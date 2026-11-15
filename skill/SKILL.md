@@ -52,9 +52,10 @@ vnotes frames DIR 1:22 3:54 12:40 1:07:30
 
 Times can be seconds, `mm:ss` or `h:mm:ss`. Ask for the whole list in one call. The helper writes one 1080p image per time to `DIR/frames/` (named by time, `01-22.jpg`), builds contact sheets, and prints which tile is which.
 
-1. Look at each contact sheet.
-2. A frame that is mid-animation, mid-transition, or not yet showing what you wanted gets **one** nudge: ask for a time a few seconds later, or earlier. Keep the better of the two, or drop both.
-3. Before you quote small text, numbers, labels, an equation or code from a frame, open that frame's own file at full size. If you still cannot read it, say so. Do not guess.
+1. Look at each contact sheet and check every picture on your list against its frame. A frame misses when it is mid-animation, mid-transition, or shows a different slide from the one you saw on the index. Index tiles are 10 seconds apart and only approximate, so a slide you saw on one tile may have been up for only a few seconds.
+2. For every picture that was missed, make **one more call** that brackets it: five or six times spread between the index tile before and the index tile after the one that showed it. For a slide seen on the 7:20 tile, ask for `7:12 7:15 7:18 7:22 7:25 7:28`. Put every bracket in the same call. Keep the best frame from each bracket and ignore the rest.
+3. If a picture is still missing after that call, do not call again. Say in the notes which picture you could not capture.
+4. Before you quote small text, numbers, labels, an equation or code from a frame, open that frame's own file at full size. If you still cannot read it, say so. Do not guess.
 
 ## 4. Write `DIR/notes.md`
 

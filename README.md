@@ -42,7 +42,7 @@ Or, inside an agent session that has the skill, ask for notes on a URL.
 
 1. `vnotes fetch` writes the transcript and **index sheets**: low-resolution contact sheets of the whole timeline, one tile every 10 seconds.
 2. The agent reads the transcript and looks at every index sheet. Speakers do not announce most of what they show, so the index is how unmentioned slides and diagrams get found.
-3. The agent asks `vnotes frames` for sharp 1080p frames at the moments it chose, checks them, and retries a frame once if it caught an animation halfway.
+3. The agent asks `vnotes frames` for sharp 1080p frames at the moments it chose and checks them. For any picture the first call missed, it makes one more call that brackets it with several times between the neighbouring index tiles, and keeps the best.
 4. The agent writes `notes.md` with each image directly after the text it supports.
 
 Quality comes first: there is no time limit and no cap on frames. A longer video gets more index sheets, not a thinner look.
@@ -87,8 +87,10 @@ What the helper takes care of, so the agent does not have to get it right by luc
 
 - uses the newest `yt-dlp` on `PATH` and ignores your `yt-dlp` config
 - prefers human captions in the video's language, then automatic captions of the spoken words
+- downloads captions with `yt-dlp`, and says so when captions exist but cannot be fetched and the audio is transcribed instead
 - reads frames from the direct stream and falls back to HLS; retries reads that drop
-- keeps signed stream addresses out of its output and off disk
+- keeps signed stream addresses out of its output and out of the notes folder
+- downloads a small 240p copy to build the index, because reading a long remote stream with `ffmpeg` is throttled
 - rejects times past the end of the video
 - replaces an existing frame or index only when the new one is complete
 - refuses an empty transcription instead of writing an empty transcript
