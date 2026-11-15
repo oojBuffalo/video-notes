@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""Helper for the video-notes skill: fetch a transcript and index sheets, pull frames.
+
+The agent that runs the skill reads, looks and writes. This script does the
+fixed work around it and contains no model API code.
+"""
+import argparse
+import contextlib
+import functools
+import html
+import http.client
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+EVERY = 10  # seconds between index tiles
+COLS, ROWS = 6, 5  # six 10 s tiles make each index row one minute
+MODEL_DIRS = ['/usr/local/share/whisper/models']
+# codex features switched off for a headless run, so that view_image is what remains
+CODEX_OFF = ('shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', 'browser_use',
+             'browser_use_external', 'computer_use', 'image_generation', 'in_app_browser', 'hooks',
+             'skill_search', 'tool_suggest', 'multi_agent', 'goals', 'sleep_tool')
+FIT = 'scale={0}:{1}:force_original_aspect_ratio=decrease,pad={0}:{1}:(ow-iw)/2:(oh-ih)/2'
+
+
+class Fail(Exception):
+    """An error to show the user as one plain line."""
+
+
+def stamp(seconds):
+    """Formats seconds as a transcript time.
+
+    Args:
+        seconds: Offset from the start of the video.
+
+    Returns:
+        `mm:ss` under an hour, `h:mm:ss` from one hour on.
+    """
+    seconds = int(seconds)
+    hours, minutes, rest = seconds // 3600, seconds % 3600 // 60, seconds % 60
+    return f'{hours}:{minutes:02}:{rest:02}' if hours else f'{minutes:02}:{rest:02}'
+
+
+def parse_time(text):
+    """Reads a time the agent typed.
+
+    Args:
+        text: Seconds, `mm:ss` or `h:mm:ss`, with or without square brackets.
+
+    Returns:
+        The time in whole seconds.
+
+    Raises:
+        Fail: If the text is not a time.
+    """
+    parts = text.strip('[]').split(':')
+    if len(parts) > 3 or not all(part.isdigit() for part in parts):
+        raise Fail(f'Not a time: {text!r}. Use seconds, mm:ss or h:mm:ss.')
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return seconds
+
+
+def caption_lines(data):
+    """Turns a json3 caption file into transcript lines.
+
+    Args:
+        data: Parsed json3 captions.
+
+    Returns:
+        One `[mm:ss] text` string per caption that has text.
+    """
+    lines = []
+    for event in data.get('events', []):
+        text = ''.join(seg.get('utf8', '') for seg in event.get('segs', []))
+        text = html.unescape(' '.join(text.split()))
+        if text:
+            lines.append(f"[{stamp(event['tStartMs'] / 1000)}] {text}")
+    return lines
+
+
+def whisper_lines(data):
+    """Turns whisper-cli JSON output into transcript lines.
+
+    Args:
+        data: Parsed `whisper-cli -oj` output.
+
+    Returns:
+        One `[mm:ss] text` string per segment that has text.
+    """
+    return [f"[{stamp(seg['offsets']['from'] / 1000)}] {seg['text'].strip()}"
+            for seg in data.get('transcription', []) if seg['text'].strip()]
+
+
+def pick_tracks(info):
+    """Orders the caption tracks worth trying, best first.
+
+    Human captions in the video's language come first, then the automatic
+    track of the spoken words (`-orig`), then other automatic tracks in that
+    language.
+
+    Args:
+        info: yt-dlp's info for the video.
+
+    Returns:
+        A list of `(label, url)` pairs for json3 tracks.
+    """
+    # ponytail: only the video's own language (English when unknown) is tried;
+    # anything else falls through to transcription. Add a --lang flag if needed.
+    base = (info.get('language') or 'en').split('-')[0]
+    found = []
+    for kind, tracks in (('human', info.get('subtitles') or {}),
+                         ('automatic', info.get('automatic_captions') or {})):
+        langs = [lang for lang in tracks if lang.split('-')[0] == base]
+        if kind == 'human':
+            langs.sort(key=lambda lang: (lang != base, lang))
+        else:
+            langs.sort(key=lambda lang: (not lang.endswith('-orig'), lang))
+        for lang in langs:
+            url = next((f['url'] for f in tracks[lang] if f.get('ext') == 'json3'), None)
+            if url:
+                found.append((f'{lang} ({kind})', url))
+    return found
+
+
+def pick_streams(formats, height):
+    """Chooses the video streams to read frames from.
+
+    Args:
+        formats: yt-dlp's format list for the video.
+        height: Tallest picture wanted, in pixels.
+
+    Returns:
+        Stream URLs to try in order: the best direct stream, then the best HLS
+        stream. Empty when the video has no picture.
+    """
+    def best(protocols):
+        video = [f for f in formats if f.get('url') and f.get('protocol') in protocols
+                 and f.get('vcodec') not in (None, 'none')]
+        fits = [f for f in video if (f.get('height') or 0) <= height]
+        if fits:
+            # avc1 decodes everywhere, so it wins a tie on height
+            return max(fits, key=lambda f: (f.get('height') or 0, f['vcodec'].startswith('avc1')))['url']
+        return min(video, key=lambda f: f.get('height') or 0)['url'] if video else None
+
+    return [url for url in (best(('https', 'http')), best(('m3u8_native', 'm3u8'))) if url]
+
+
+def run(command, timeout):
+    """Runs a command without letting stream addresses reach the output.
+
+    Args:
+        command: Program and arguments.
+        timeout: Seconds to wait before giving up.
+
+    Returns:
+        `(ok, stdout, error text)`. The error text has every URL removed.
+    """
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, '', f'timed out after {timeout} s'
+    return done.returncode == 0, done.stdout, re.sub(r'https?://\S+', '<url>', done.stderr).strip()
+
+
+@functools.lru_cache
+def newest_ytdlp():
+    """Finds the newest yt-dlp on PATH; an old copy often fails on current sites.
+
+    Returns:
+        Path of the yt-dlp with the highest version.
+
+    Raises:
+        Fail: If there is no yt-dlp on PATH.
+    """
+    found = {}
+    for folder in os.get_exec_path():
+        path = os.path.join(folder, 'yt-dlp')
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            version = tuple(int(n) for n in re.findall(r'\d+', run([path, '--version'], 30)[1]))
+            found.setdefault(version, path)
+    if not found:
+        raise Fail('yt-dlp is not installed or not on PATH.')
+    return found[max(found)]
+
+
+def ytdlp(*args, timeout=180):
+    """Runs the newest yt-dlp, ignoring the user's yt-dlp config.
+
+    Args:
+        *args: Arguments after the fixed safe ones.
+        timeout: Seconds to wait.
+
+    Returns:
+        `(ok, stdout, error text)` as from `run`.
+    """
+    return run([newest_ytdlp(), '--ignore-config', '--no-warnings', '--no-playlist', *args], timeout)
+
+
+def video_info(url):
+    """Asks yt-dlp for everything it knows about a video.
+
+    Args:
+        url: The video page.
+
+    Returns:
+        yt-dlp's info dictionary.
+
+    Raises:
+        Fail: If yt-dlp cannot read the page.
+    """
+    ok, out, error = ytdlp('-J', '--', url)
+    if not ok:
+        raise Fail(f'yt-dlp could not read {url}: {error[-300:]}')
+    return json.loads(out)
+
+
+def transcribe(url, language):
+    """Downloads the audio and transcribes it with whisper-cli.
+
+    Args:
+        url: The video page.
+        language: Spoken language code, or `auto`.
+
+    Returns:
+        Transcript lines.
+
+    Raises:
+        Fail: If whisper-cli or its model file is missing, or a step fails.
+    """
+    cli = shutil.which('whisper-cli')
+    if not cli:
+        raise Fail('No usable captions, and whisper-cli is not installed, so the audio cannot be transcribed.')
+    model = os.environ.get('VNOTES_WHISPER_MODEL') or next(
+        (str(path) for folder in MODEL_DIRS for path in sorted(Path(folder).glob('ggml-*.bin'))), '')
+    if not os.path.isfile(model):
+        raise Fail('No usable captions, and no whisper model file. Set VNOTES_WHISPER_MODEL to a '
+                   f'ggml-*.bin file (looked in {", ".join(MODEL_DIRS)}).')
+    with tempfile.TemporaryDirectory() as tmp:
+        ok, _, error = ytdlp('-f', 'ba/b', '-x', '--audio-format', 'wav', '--postprocessor-args',
+                             'ffmpeg:-ar 16000 -ac 1', '-o', f'{tmp}/audio.%(ext)s', '--', url, timeout=3600)
+        if not ok:
+            raise Fail(f'Could not download the audio: {error[-300:]}')
+        whisper = [cli, '-m', model, '-f', f'{tmp}/audio.wav', '-l', language, '-oj', '-of', f'{tmp}/out']
+        ok, _, error = run(whisper, 4 * 3600)
+        if not ok:  # a sandbox can block the GPU; the CPU is slower but works
+            print('whisper-cli failed on the GPU. Trying again on the CPU, which is slower.', file=sys.stderr)
+            ok, _, error = run([*whisper, '-ng'], 12 * 3600)
+        if not ok:
+            raise Fail(f'whisper-cli failed: {error[-300:]}')
+        return whisper_lines(json.loads(Path(tmp, 'out.json').read_text()))
+
+
+def index_sheets(info, out):
+    """Writes low-resolution contact sheets covering the whole timeline.
+
+    Args:
+        info: yt-dlp's info for the video.
+        out: The notes folder.
+
+    Returns:
+        Sheet paths in time order. Empty when the video has no picture.
+
+    Raises:
+        Fail: If the video has a picture but no stream could be read.
+    """
+    streams = pick_streams(info.get('formats') or [], 240)
+    if not streams:
+        return []
+    folder, build = out / 'index', out / 'index.part'  # the old index stays until a new one is complete
+    shutil.rmtree(build, ignore_errors=True)
+    build.mkdir()
+    grid = f'fps=1/{EVERY},{FIT.format(320, 180)},tile={COLS}x{ROWS}:padding=4:color=white'
+    for stream in streams:
+        ok, _, error = run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-i', stream, '-vf', grid,
+                            '-q:v', '4', str(build / '%04d.jpg')], 600 + int(info.get('duration') or 0))
+        sheets = sorted(build.glob('*.jpg'))
+        if ok and sheets:
+            minutes = COLS * ROWS * EVERY // 60
+            names = [sheet.rename(build / f'index-{n * minutes:03}m.jpg').name for n, sheet in enumerate(sheets)]
+            shutil.rmtree(folder, ignore_errors=True)
+            build.rename(folder)
+            return [folder / name for name in names]
+        for sheet in sheets:
+            sheet.unlink()
+    shutil.rmtree(build, ignore_errors=True)
+    raise Fail(f'Could not build the index sheets: {error[-300:]}')
+
+
+def fetch(url, out=None, force_transcribe=False):
+    """Writes meta.json, transcript.txt and the index sheets for a video.
+
+    Args:
+        url: The video page.
+        out: Folder to write into. Defaults to `notes-<video id>`.
+        force_transcribe: Transcribe the audio even when captions exist.
+
+    Returns:
+        The folder written.
+
+    Raises:
+        Fail: If the video, its words or its index cannot be fetched.
+    """
+    info = video_info(url)
+    out = Path(out or f"notes-{info['id']}")
+    out.mkdir(parents=True, exist_ok=True)
+    lines, source = [], None
+    for source, track in [] if force_transcribe else pick_tracks(info):
+        for _ in range(3):  # a caption download cut off mid-transfer usually works on retry
+            try:
+                with urllib.request.urlopen(track, timeout=60) as reply:
+                    lines = caption_lines(json.load(reply))
+                break
+            except (OSError, ValueError, http.client.HTTPException):
+                continue
+        if lines:
+            break
+    if not lines:
+        print('Transcribing the audio. This takes longer than reading captions.', file=sys.stderr)
+        lines = transcribe(url, (info.get('language') or 'auto').split('-')[0])
+        source = 'whisper-cli transcription'
+        if not lines:
+            raise Fail('The audio was transcribed but no speech was found, so there are no words to make notes from.')
+    meta = {key: info.get(key) for key in
+            ('id', 'title', 'uploader', 'duration', 'upload_date', 'chapters', 'description')}
+    meta.update(url=info.get('webpage_url') or url, words=source)
+    (out / 'meta.json').write_text(json.dumps(meta, indent=1, ensure_ascii=False) + '\n')
+    (out / 'transcript.txt').write_text('\n'.join(lines) + '\n')
+    print(f'{out}/meta.json')
+    print(f'{out}/transcript.txt  {len(lines)} lines from {source}')
+    sheets = index_sheets(info, out)
+    if not sheets:
+        print('No picture in this video, so no index sheets.')
+        return out
+    print(f'Index sheets: one tile every {EVERY} s, {COLS} tiles per row, so each row is one minute.')
+    for n, sheet in enumerate(sheets):
+        print(f'{sheet}  starts {stamp(n * COLS * ROWS * EVERY)}')
+    return out
+
+
+def frames(out, times, url=None):
+    """Writes full-size frames at the given times, plus contact sheets.
+
+    Args:
+        out: A folder that `fetch` has filled.
+        times: Times as typed: seconds, `mm:ss` or `h:mm:ss`.
+        url: The video page. Defaults to the one recorded in meta.json.
+
+    Returns:
+        Process exit code: 0 when every frame arrived, 1 otherwise.
+
+    Raises:
+        Fail: If the folder was not fetched, a time is malformed, or the video
+            has no picture.
+    """
+    out = Path(out)
+    try:
+        meta = json.loads((out / 'meta.json').read_text())
+        url = url or meta['url']
+    except (OSError, ValueError, KeyError):
+        raise Fail(f'{out}/meta.json is missing or unreadable. Run `vnotes fetch URL {out}` first.') from None
+    seconds = sorted({parse_time(text) for text in times})
+    length = meta.get('duration')
+    if length and seconds[-1] >= length:  # ffmpeg would return the last frame for these
+        raise Fail(f'{stamp(seconds[-1])} is past the end of the video ({stamp(length)}).')
+    # ponytail: the signed stream address is resolved again on every call (about
+    # 6 s) and never written to disk. Cache it if that wait starts to matter.
+    streams = pick_streams(video_info(url).get('formats') or [], 1080)
+    if not streams:
+        raise Fail('This video has no picture to take frames from.')
+    folder = out / 'frames'
+    folder.mkdir(exist_ok=True)
+
+    def grab(second):
+        path = folder / f"{stamp(second).replace(':', '-')}.jpg"
+        part = path.with_suffix('.part.jpg')  # an existing frame is replaced only by a good new one
+        errors = []
+        for stream in streams * 3:  # stream reads drop at random; a retry usually works
+            ok, _, error = run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-ss', str(second), '-i', stream,
+                                '-frames:v', '1', '-update', '1', '-q:v', '2', '-y', str(part)], 90)
+            if ok and part.exists() and part.stat().st_size:
+                os.replace(part, path)
+                return path, ''
+            errors.append(error.splitlines()[-1] if error else 'no picture came back')
+        part.unlink(missing_ok=True)
+        return None, '; '.join(dict.fromkeys(errors))
+
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(grab, seconds))
+    got = [(second, path) for second, (path, _) in zip(seconds, results) if path]
+    missed = [f'{stamp(second)} ({error})' for second, (path, error) in zip(seconds, results) if not path]
+    first = len(list(folder.glob('sheet-*.jpg'))) + 1
+    with tempfile.TemporaryDirectory() as tmp:
+        for n, (_, path) in enumerate(got):
+            os.symlink(path.resolve(), f'{tmp}/{n:04}.jpg')
+        ok, _, error = run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-start_number', '0',
+                            '-i', f'{tmp}/%04d.jpg', '-vf', f'{FIT.format(640, 360)},tile=4x3:padding=6:color=white',
+                            '-q:v', '3', '-start_number', str(first), str(folder / 'sheet-%02d.jpg')], 300)
+    if got and not ok:
+        print(f'Could not build a contact sheet ({error[-200:]}); the frames are still there.')
+    for n in range(0, len(got) if ok else 0, 12):
+        print(f'{folder}/sheet-{first + n // 12:02}.jpg  tiles in time order, left to right, top to bottom:')
+        for row in range(n, min(n + 12, len(got)), 4):
+            print('  ' + '  '.join(stamp(second) for second, _ in got[row:row + 4]))
+    if got:
+        print(f'Full-size frames are in {folder}/, named by time, for example {got[0][1].name}.')
+    for line in missed:
+        print(f'Could not get {line}')
+    return 1 if missed else 0
+
+
+def ask(agent, message, out):
+    """Runs one headless turn in which the agent can look at files and do nothing else.
+
+    Args:
+        agent: `claude` or `codex`.
+        message: The whole prompt.
+        out: The notes folder, used as the working folder.
+
+    Returns:
+        The agent's final reply.
+
+    Raises:
+        Fail: If the harness fails or says nothing.
+    """
+    if agent == 'claude':
+        # Read is the only tool, confined to the folder; no user settings, plugins, hooks or MCP servers
+        done = subprocess.run(['claude', '-p', '--tools', 'Read', '--restricted', '--safe-mode',
+                               '--strict-mcp-config', '--no-session-persistence'],
+                              cwd=out, input=message, stdout=subprocess.PIPE, text=True)
+        reply = done.stdout
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            last = Path(tmp, 'reply.md')
+            done = subprocess.run(['codex', 'exec', '--ignore-user-config', '--ephemeral', '--skip-git-repo-check',
+                                   '-s', 'read-only', *(flag for name in CODEX_OFF for flag in ('--disable', name)),
+                                   '-c', 'web_search="disabled"', '-o', str(last), '-'],
+                                  cwd=out, input=message, stdout=subprocess.DEVNULL, text=True)
+            reply = last.read_text() if last.is_file() else ''
+    if done.returncode or not reply.strip():
+        raise Fail(f'{agent} gave no reply (exit code {done.returncode}).')
+    return reply.strip()
+
+
+def notes(url, request, agent, out):
+    """Fetches a video, then runs the skill headless in an installed harness.
+
+    The transcript and the pictures are untrusted text, so the agent can only
+    read. It replies with either a frame request or the finished notes; this
+    function pulls the frames and writes notes.md itself.
+
+    Args:
+        url: The video page.
+        request: What the reader wants from the notes, or None.
+        agent: `claude` or `codex`; uses that CLI's existing login.
+        out: Folder to write into, or None for the default.
+
+    Raises:
+        Fail: If the harness is missing or never returns usable notes.
+    """
+    if not shutil.which(agent):
+        raise Fail(f'{agent} is not installed or not on PATH.')
+    out = fetch(url, out).resolve()
+    sheets = '\n'.join(str(sheet) for sheet in sorted((out / 'index').glob('*.jpg'))) or 'none: the video has no picture'
+    brief = (f'Write video notes by following the skill at the end of this message.\n\nURL: {url}\n'
+             f'What the reader asked for: {request or "thorough study notes"}\n\n'
+             f'You are running headless. You can look at files in {out} and do nothing else: '
+             'no commands, no writing, no network.\n'
+             'Step 1 is done. meta.json and transcript.txt are copied below. The index sheets are:\n'
+             f'{sheets}\n\n'
+             'A program reads your reply, in one of two ways:\n'
+             '- To get frames (step 3), make the first line of your reply `FRAMES:` followed by the times, for '
+             'example `FRAMES: 1:22 3:54 12:40`. Under that line write notes to yourself: what you have worked '
+             'out and why you want each frame. You will be started again as a fresh session and given those '
+             'notes and the frames. Ask for a nudge the same way.\n'
+             '- When the notes are finished (step 4), reply with the complete text of notes.md and nothing '
+             'else: no preamble and no code fence. Your reply is saved as notes.md word for word. Link images '
+             'as `frames/01-22.jpg`.\n\n')
+    material = (f"## meta.json\n\n{(out / 'meta.json').read_text()}\n"
+                f"## transcript.txt\n\n{(out / 'transcript.txt').read_text()}\n"
+                + (Path(__file__).resolve().parent / 'skill' / 'SKILL.md').read_text())
+    progress = ''
+    # ponytail: every turn is a fresh session that reads the material again, because not every
+    # harness can resume one. Resume the session instead if the repeated reading costs too much.
+    for turn in range(1, 7):
+        reply = ask(agent, brief + progress + material, out)
+        first, _, rest = reply.partition('\n')
+        if first.upper().startswith('FRAMES:'):
+            report = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(report):
+                    frames(out, first[len('FRAMES:'):].split(), url)
+                outcome = report.getvalue()
+            except Fail as error:
+                outcome = f'The request did not work: {error}'
+            print(outcome)
+            progress += f'## Progress: turn {turn}\n\nYou replied:\n\n{reply}\n\nWhat happened:\n\n{outcome}\n\n'
+            continue
+        missing = sorted({link for link in re.findall(r'\]\(([^)\s]+\.jpg)\)', reply) if not (out / link).is_file()})
+        if not missing:
+            part = out / 'notes.md.part'
+            part.write_text(reply + '\n')
+            os.replace(part, out / 'notes.md')
+            print(out / 'notes.md')
+            return
+        outcome = f'Your notes were not saved. They link to images that do not exist: {", ".join(missing)}.'
+        print(outcome)
+        progress += (f'## Progress: turn {turn}\n\n{outcome} Ask for them with FRAMES:, or reply with the '
+                     'full notes again without those links.\n\n')
+    raise Fail(f'{agent} did not return usable notes in six turns.')
+
+
+def main():
+    """Runs the command line.
+
+    Returns:
+        Process exit code.
+    """
+    parser = argparse.ArgumentParser(prog='vnotes', description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest='command', required=True)
+    sub = commands.add_parser('fetch', help='write meta.json, transcript.txt and index sheets')
+    sub.add_argument('url')
+    sub.add_argument('dir')
+    sub.add_argument('--transcribe', action='store_true', help='transcribe the audio even when captions exist')
+    sub = commands.add_parser('frames', help='write 1080p frames and a contact sheet')
+    sub.add_argument('dir')
+    sub.add_argument('times', nargs='+', metavar='TIME', help='seconds, mm:ss or h:mm:ss')
+    sub = commands.add_parser('notes', help='run the skill headless and write notes.md')
+    sub.add_argument('url')
+    sub.add_argument('--prompt', help='what you want from the notes')
+    sub.add_argument('--agent', choices=['claude', 'codex'], default='claude')
+    sub.add_argument('--out', metavar='DIR', help='folder to write into (default: notes-<video id>)')
+    args = parser.parse_args()
+    try:
+        if not shutil.which('ffmpeg'):
+            raise Fail('ffmpeg is not installed or not on PATH.')
+        if args.command == 'fetch':
+            fetch(args.url, args.dir, args.transcribe)
+        elif args.command == 'frames':
+            return frames(args.dir, args.times)
+        else:
+            notes(args.url, args.prompt, args.agent, args.out)
+    except Fail as error:
+        print(f'vnotes: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
