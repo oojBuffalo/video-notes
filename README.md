@@ -1,32 +1,115 @@
 # Video notes
 
-Generate explanatory notes from a video's English captions and 48 sampled 1080p frames. Notes include timestamp links and the images supporting visual claims.
+Turn a video URL into study notes with the video's diagrams, slides and code placed beside the text they support.
 
-## Run
+![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white)
 
-Requires Python 3, `yt-dlp`, `ffmpeg`, and an authenticated `codex` CLI.
+The product is an agent skill: [`skill/SKILL.md`](skill/SKILL.md).
+An agent you already pay for (Claude Code, Codex) reads the transcript, looks at the video's pictures itself and writes the notes.
+A small helper, `vnotes`, does the fixed work around it. There is no model API code here and no API key to set.
+
+[Setup](#setup) · [Usage](#usage) · [How it works](#how-it-works) · [Commands](#commands) · [Limits](#limits) · [Development](#development)
+
+## Setup
+
+You need Python 3, `yt-dlp` and `ffmpeg` on `PATH`. No Python packages are installed.
 
 ```sh
-./vnotes.py 'https://www.youtube.com/watch?v=tUPPVhBBcoM' \
-  --out runs/my-video \
-  --prompt 'Explain the diagrams and important caveats.'
+ln -s "$PWD/vnotes" ~/.local/bin/vnotes                 # put the helper on PATH
+ln -s "$PWD/skill" ~/.claude/skills/video-notes         # optional: use the skill inside Claude Code
 ```
 
-The prompt is optional. The output directory must be new. Open `runs/my-video/notes.md` when the command finishes. The directory also contains sources, model responses, and timing data for inspection. Failed runs return a nonzero exit status.
+A video without captions is transcribed from its audio. That needs `whisper-cli` (whisper.cpp) and a `ggml-*.bin` model file, found in `/usr/local/share/whisper/models` or named by `VNOTES_WHISPER_MODEL`.
+If the GPU is unavailable (for example inside a command sandbox), transcription is retried on the CPU, which took about three minutes for a ten-minute video here.
 
-Codex uses your existing login and its default model. Set `--model` to choose another model. It runs in ephemeral, read-only mode without user configuration, instructed to use the supplied sources without tools. Captions and images are sent to the model provider.
+## Usage
 
-For Gemini, use `--engine gemini` with `GOOGLE_API_KEY` configured. `--model` and `--review-model` select its draft and review models; both default to `gemini-3.5-flash-lite`.
+One command, using the login of an agent CLI you already have:
 
-## Saved results
+```sh
+vnotes notes 'https://www.youtube.com/watch?v=tUPPVhBBcoM' \
+  --prompt 'Focus on the architecture diagrams.' \
+  --agent claude \
+  --out runs/my-video
+```
 
-| Video | End-to-end time | Notes |
-|---|---:|---|
-| YC Paper Club, 81:42 | 49.2 s | [Read](runs/yc-paper-club/notes.md) |
-| Vectors, 9:51 | 33.3 s | [Read](runs/vectors/notes.md) |
-| Warp factory engineering, 20:36 | 38.0 s | [Read](runs/warp-factory/notes.md) |
+`--prompt`, `--agent` (`claude` or `codex`, default `claude`) and `--out` (default `notes-<video id>`) are optional.
+Open `runs/my-video/notes.md` when it finishes. The transcript, index sheets and frames stay beside it.
 
-These local results are ignored by Git. See [validation](docs/validation.md) for checks and limitations.
+Or, inside an agent session that has the skill, ask for notes on a URL.
+
+## How it works
+
+1. `vnotes fetch` writes the transcript and **index sheets**: low-resolution contact sheets of the whole timeline, one tile every 10 seconds.
+2. The agent reads the transcript and looks at every index sheet. Speakers do not announce most of what they show, so the index is how unmentioned slides and diagrams get found.
+3. The agent asks `vnotes frames` for sharp 1080p frames at the moments it chose, checks them, and retries a frame once if it caught an animation halfway.
+4. The agent writes `notes.md` with each image directly after the text it supports.
+
+Quality comes first: there is no time limit and no cap on frames. A longer video gets more index sheets, not a thinner look.
+
+### What the headless agent is allowed to do
+
+A transcript and the text on a slide are written by strangers, and the agent reads both. So `vnotes notes` runs the agent read-only and does the rest itself:
+
+- The agent's reply is either `FRAMES: 1:22 3:54 …` or the finished notes. `vnotes` pulls the frames from the URL you gave on the command line, and `vnotes` writes `notes.md`.
+- Notes that link to an image that does not exist are not saved.
+- Each frame request starts the agent again as a fresh session, so a headless run reads the material two or three times.
+
+What was checked by asking each agent to try, on this machine (`claude` 2.1.325, `codex-cli` 0.169.0):
+
+| | `claude` | `codex` |
+|---|---|---|
+| Launch | only the `Read` tool, `--restricted`, `--safe-mode`, `--strict-mcp-config`, no saved session | `-s read-only`, `--ignore-user-config`, `--ephemeral`, web search off, 16 features off including `shell_tool` |
+| Run a shell command | no tool for it | no tool for it |
+| Write a file | no tool for it | rejected by the read-only sandbox |
+| Fetch a URL or search | no tool for it | no tool for it |
+| Read outside the notes folder | blocked | cannot read text files at all; it views images |
+
+What this does **not** guarantee:
+
+- The feature list switched off for `codex` matches version 0.169.0. A newer version can add tools that the list does not name. It still listed tools for patching files, starting sub-agents and listing MCP resources, and no switch was found that removes them. When tried, patching was rejected by the sandbox, a sub-agent had the same limits as its parent, and the MCP resource list was empty.
+- Admin-managed `claude` settings still apply.
+- The agent can still be misled. A hostile transcript cannot make it run or send anything, but it can make the notes wrong, or put a misleading link in them. Read the notes as you would read the video.
+- The transcript and frames are sent to the model provider.
+
+Inside your own interactive session the skill runs `vnotes frames` directly, under whatever permissions that session has. None of the above applies there.
+
+## Commands
+
+| Command | Writes |
+|---|---|
+| `vnotes fetch URL DIR` | `meta.json`, `transcript.txt` (`[mm:ss] text` lines), `index/index-NNNm.jpg` |
+| `vnotes fetch --transcribe URL DIR` | the same, with the audio transcribed even when captions exist |
+| `vnotes frames DIR TIME...` | `frames/MM-SS.jpg` at 1080p and `frames/sheet-NN.jpg` contact sheets; times are seconds, `mm:ss` or `h:mm:ss` |
+| `vnotes notes URL [--prompt TEXT] [--agent claude\|codex] [--out DIR]` | everything above, then `notes.md` from the agent's reply |
+
+What the helper takes care of, so the agent does not have to get it right by luck:
+
+- uses the newest `yt-dlp` on `PATH` and ignores your `yt-dlp` config
+- prefers human captions in the video's language, then automatic captions of the spoken words
+- reads frames from the direct stream and falls back to HLS; retries reads that drop
+- keeps signed stream addresses out of its output and off disk
+- rejects times past the end of the video
+- replaces an existing frame or index only when the new one is complete
+- refuses an empty transcription instead of writing an empty transcript
+
+## Limits
+
+- Captions are tried only in the video's own language (English when the site does not say). Anything else is transcribed.
+- Index tiles are 10 seconds apart, so a picture on screen for less than that can be missed.
+- Index tiles carry no printed time. The agent works it out from the layout: each row is one minute.
+- The notes are only as careful as the agent that writes them. The skill tells it to quote small text only from a frame opened at full size.
+- Tested on YouTube only.
+
+## Project layout
+
+```
+skill/SKILL.md   the skill: what the agent does, step by step
+vnotes           the helper: one standard-library Python script
+tests/           checks for caption parsing, track choice, stream choice, time formats
+docs/            council reports and records from the earlier prototype
+runs/            generated notes (ignored by git)
+```
 
 ## Development
 
@@ -34,18 +117,4 @@ These local results are ignored by Git. See [validation](docs/validation.md) for
 python3 -m unittest discover -s tests -v
 ```
 
-```text
-vnotes.py          command and pipeline
-tests/            regression tests
-docs/             validation record
-runs/             generated output (ignored)
-.local/           archived experiments (ignored)
-```
-
-The previous experiment workspace is preserved in `.local/benchmark-history.tar.gz`; every archived file was hash-checked before removing the loose originals. The runnable implementation is `vnotes.py`; scripts inside saved runs are historical snapshots.
-
-## Limits
-
-English captions and an accessible 1080p H264 stream are required; HLS is tried when direct streams fail. There is no speech-transcription fallback. Adjacent short chapters are grouped into at most six sections.
-
-The 60-second budget covers acquisition, synthesis, validation, and writing notes. Provider delays can cause failure, and cleanup may finish after the deadline. Forty-eight sampled frames can miss brief diagrams. Valid source IDs do not guarantee factual correctness.
+<!-- TODO: license -->
