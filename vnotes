@@ -10,6 +10,7 @@ import functools
 import html
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -265,10 +266,10 @@ def sheet_starts(length):
         length: Length of the video in seconds.
 
     Returns:
-        One start time in seconds per sheet. A tail shorter than half a tile
-        gets no sheet of its own.
+        One start time in seconds per sheet: `ceil(length / SPAN)` of them, so
+        the last partial stretch of the video gets a sheet too.
     """
-    return list(range(0, max(int(length - EVERY / 2), 1), SPAN))
+    return list(range(0, math.ceil(length), SPAN))
 
 
 def index_sheets(info, out):
@@ -298,13 +299,13 @@ def index_sheets(info, out):
         videos = [path for path in Path(tmp).glob('video.*') if path.suffix != '.part']
         if not ok or not videos:
             raise Fail(f'Could not download the low-resolution video for the index: {error[-300:]}')
-        length = info.get('duration')
-        if not length:  # the site did not say, so ask the file
-            try:
-                length = float(run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-                                    '-of', 'csv=p=0', str(videos[0])], 120)[1])
-            except ValueError:
-                raise Fail('Could not find out how long the video is, so the index cannot be built.') from None
+        try:  # the file's own length decides the sheets; the site's figure is a rounded fallback
+            length = float(run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                                '-of', 'csv=p=0', str(videos[0])], 120)[1])
+        except ValueError:
+            length = info.get('duration')
+        if not length:
+            raise Fail('Could not find out how long the video is, so the index cannot be built.')
         shutil.rmtree(build, ignore_errors=True)
         build.mkdir()
 
@@ -319,9 +320,11 @@ def index_sheets(info, out):
         with ThreadPoolExecutor(8) as pool:
             results = list(pool.map(sheet, sheet_starts(length)))
     failed = [error for name, error in results if not name]
-    if failed:
+    # ponytail: a last sheet with less than one frame of video comes back empty and fails the index
+    if failed or len(results) != math.ceil(length / SPAN):
         shutil.rmtree(build, ignore_errors=True)
-        raise Fail(f'Could not build {len(failed)} of {len(results)} index sheets: {failed[0][-300:]}')
+        raise Fail(f'Could not build {len(failed)} of {math.ceil(length / SPAN)} index sheets: '
+                   f'{(failed or ["wrong sheet count"])[0][-300:]}')
     shutil.rmtree(folder, ignore_errors=True)
     build.rename(folder)
     return [folder / name for name, _ in results]
@@ -377,7 +380,7 @@ def fetch(url, out=None, force_transcribe=False):
     if not sheets:
         print('No picture in this video, so no index sheets.')
         return out
-    print(f'Index sheets: one tile every {EVERY} s, {COLS} tiles per row, so each row is one minute.')
+    print(f'{len(sheets)} index sheets: one tile every {EVERY} s, {COLS} tiles per row, so each row is one minute.')
     for n, sheet in enumerate(sheets):
         print(f'{sheet}  starts {stamp(n * SPAN)}')
     return out

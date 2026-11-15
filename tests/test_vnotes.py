@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import math
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -40,13 +41,14 @@ class TimeTests(unittest.TestCase):
 
 
 class IndexTests(unittest.TestCase):
-    def test_one_sheet_per_five_minutes_and_no_sheet_for_a_sliver(self):
+    def test_sheet_count_is_the_length_over_five_minutes_rounded_up(self):
         self.assertEqual(vnotes.sheet_starts(591), [0, 300])
         self.assertEqual(vnotes.sheet_starts(600), [0, 300])
-        self.assertEqual(vnotes.sheet_starts(603), [0, 300])
-        self.assertEqual(vnotes.sheet_starts(606), [0, 300, 600])
-        self.assertEqual(len(vnotes.sheet_starts(4920)), 17)
+        self.assertEqual(vnotes.sheet_starts(600.4), [0, 300, 600])
         self.assertEqual(vnotes.sheet_starts(3), [0])
+        for length in (1, 299, 300, 301, 4902, 10800.5):
+            self.assertEqual(len(vnotes.sheet_starts(length)), math.ceil(length / 300))
+        self.assertEqual(vnotes.sheet_starts(4902)[-1], 4800)  # the final 102 s get their own sheet
 
 
 class CaptionTests(unittest.TestCase):
