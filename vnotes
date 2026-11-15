@@ -8,7 +8,6 @@ import argparse
 import contextlib
 import functools
 import html
-import http.client
 import io
 import json
 import os
@@ -17,12 +16,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 EVERY = 10  # seconds between index tiles
 COLS, ROWS = 6, 5  # six 10 s tiles make each index row one minute
+SPAN = COLS * ROWS * EVERY  # seconds of video on one index sheet
 MODEL_DIRS = ['/usr/local/share/whisper/models']
 # codex features switched off for a headless run, so that view_image is what remains
 CODEX_OFF = ('shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', 'browser_use',
@@ -112,7 +111,7 @@ def pick_tracks(info):
         info: yt-dlp's info for the video.
 
     Returns:
-        A list of `(label, url)` pairs for json3 tracks.
+        A list of `(label, language code)` pairs for tracks that offer json3.
     """
     # ponytail: only the video's own language (English when unknown) is tried;
     # anything else falls through to transcription. Add a --lang flag if needed.
@@ -126,9 +125,8 @@ def pick_tracks(info):
         else:
             langs.sort(key=lambda lang: (not lang.endswith('-orig'), lang))
         for lang in langs:
-            url = next((f['url'] for f in tracks[lang] if f.get('ext') == 'json3'), None)
-            if url:
-                found.append((f'{lang} ({kind})', url))
+            if any(f.get('ext') == 'json3' for f in tracks[lang]):
+                found.append((f'{lang} ({kind})', lang))
     return found
 
 
@@ -260,6 +258,19 @@ def transcribe(url, language):
         return whisper_lines(json.loads(Path(tmp, 'out.json').read_text()))
 
 
+def sheet_starts(length):
+    """Lists where each index sheet starts.
+
+    Args:
+        length: Length of the video in seconds.
+
+    Returns:
+        One start time in seconds per sheet. A tail shorter than half a tile
+        gets no sheet of its own.
+    """
+    return list(range(0, max(int(length - EVERY / 2), 1), SPAN))
+
+
 def index_sheets(info, out):
     """Writes low-resolution contact sheets covering the whole timeline.
 
@@ -273,27 +284,47 @@ def index_sheets(info, out):
     Raises:
         Fail: If the video has a picture but no stream could be read.
     """
-    streams = pick_streams(info.get('formats') or [], 240)
-    if not streams:
+    if not pick_streams(info.get('formats') or [], 240):
         return []
     folder, build = out / 'index', out / 'index.part'  # the old index stays until a new one is complete
-    shutil.rmtree(build, ignore_errors=True)
-    build.mkdir()
     grid = f'fps=1/{EVERY},{FIT.format(320, 180)},tile={COLS}x{ROWS}:padding=4:color=white'
-    for stream in streams:
-        ok, _, error = run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-i', stream, '-vf', grid,
-                            '-q:v', '4', str(build / '%04d.jpg')], 600 + int(info.get('duration') or 0))
-        sheets = sorted(build.glob('*.jpg'))
-        if ok and sheets:
-            minutes = COLS * ROWS * EVERY // 60
-            names = [sheet.rename(build / f'index-{n * minutes:03}m.jpg').name for n, sheet in enumerate(sheets)]
-            shutil.rmtree(folder, ignore_errors=True)
-            build.rename(folder)
-            return [folder / name for name in names]
-        for sheet in sheets:
-            sheet.unlink()
-    shutil.rmtree(build, ignore_errors=True)
-    raise Fail(f'Could not build the index sheets: {error[-300:]}')
+    with tempfile.TemporaryDirectory() as tmp:
+        # yt-dlp downloads a small copy first. Reading the remote stream with ffmpeg is throttled:
+        # one five-minute sheet of an 82-minute video took 150 s that way, and 0.2 s from a local file.
+        Path(tmp, 'info.json').write_text(json.dumps(info))
+        ok, _, error = ytdlp('--load-info-json', f'{tmp}/info.json', '-f',
+                             'bv*[height<=240][vcodec^=avc1]/bv*[height<=240]/wv*/w',
+                             '-o', f'{tmp}/video.%(ext)s', timeout=3600)
+        videos = [path for path in Path(tmp).glob('video.*') if path.suffix != '.part']
+        if not ok or not videos:
+            raise Fail(f'Could not download the low-resolution video for the index: {error[-300:]}')
+        length = info.get('duration')
+        if not length:  # the site did not say, so ask the file
+            try:
+                length = float(run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                                    '-of', 'csv=p=0', str(videos[0])], 120)[1])
+            except ValueError:
+                raise Fail('Could not find out how long the video is, so the index cannot be built.') from None
+        shutil.rmtree(build, ignore_errors=True)
+        build.mkdir()
+
+        def sheet(start):
+            target = build / f'index-{start // 60:03}m.jpg'
+            ok, _, error = run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-ss', str(start), '-t', str(SPAN),
+                                '-i', str(videos[0]), '-vf', grid, '-frames:v', '1', '-update', '1', '-q:v', '4',
+                                '-y', str(target)], 600)
+            good = ok and target.exists() and target.stat().st_size
+            return (target.name, '') if good else (None, error or 'no picture came back')
+
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(sheet, sheet_starts(length)))
+    failed = [error for name, error in results if not name]
+    if failed:
+        shutil.rmtree(build, ignore_errors=True)
+        raise Fail(f'Could not build {len(failed)} of {len(results)} index sheets: {failed[0][-300:]}')
+    shutil.rmtree(folder, ignore_errors=True)
+    build.rename(folder)
+    return [folder / name for name, _ in results]
 
 
 def fetch(url, out=None, force_transcribe=False):
@@ -313,18 +344,23 @@ def fetch(url, out=None, force_transcribe=False):
     info = video_info(url)
     out = Path(out or f"notes-{info['id']}")
     out.mkdir(parents=True, exist_ok=True)
-    lines, source = [], None
-    for source, track in [] if force_transcribe else pick_tracks(info):
-        for _ in range(3):  # a caption download cut off mid-transfer usually works on retry
+    lines, source, problem = [], None, ''
+    tracks = [] if force_transcribe else pick_tracks(info)
+    with tempfile.TemporaryDirectory() as tmp:
+        # yt-dlp downloads the captions: a plain HTTP read of a long track gets cut off
+        Path(tmp, 'info.json').write_text(json.dumps(info))
+        for source, lang in tracks:
+            problem = ytdlp('--load-info-json', f'{tmp}/info.json', '--skip-download', '--write-subs',
+                            '--write-auto-subs', '--sub-langs', lang, '--sub-format', 'json3', '-o', f'{tmp}/cap')[2]
             try:
-                with urllib.request.urlopen(track, timeout=60) as reply:
-                    lines = caption_lines(json.load(reply))
-                break
-            except (OSError, ValueError, http.client.HTTPException):
+                lines = caption_lines(json.loads(Path(tmp, f'cap.{lang}.json3').read_text()))
+            except (OSError, ValueError):
                 continue
-        if lines:
-            break
+            if lines:
+                break
     if not lines:
+        if tracks:
+            print(f'Captions exist ({tracks[0][0]}) but could not be downloaded: {problem[-200:]}', file=sys.stderr)
         print('Transcribing the audio. This takes longer than reading captions.', file=sys.stderr)
         lines = transcribe(url, (info.get('language') or 'auto').split('-')[0])
         source = 'whisper-cli transcription'
@@ -343,7 +379,7 @@ def fetch(url, out=None, force_transcribe=False):
         return out
     print(f'Index sheets: one tile every {EVERY} s, {COLS} tiles per row, so each row is one minute.')
     for n, sheet in enumerate(sheets):
-        print(f'{sheet}  starts {stamp(n * COLS * ROWS * EVERY)}')
+        print(f'{sheet}  starts {stamp(n * SPAN)}')
     return out
 
 
@@ -481,7 +517,7 @@ def notes(url, request, agent, out):
              '- To get frames (step 3), make the first line of your reply `FRAMES:` followed by the times, for '
              'example `FRAMES: 1:22 3:54 12:40`. Under that line write notes to yourself: what you have worked '
              'out and why you want each frame. You will be started again as a fresh session and given those '
-             'notes and the frames. Ask for a nudge the same way.\n'
+             'notes and the frames. Ask for the bracketing call the same way.\n'
              '- When the notes are finished (step 4), reply with the complete text of notes.md and nothing '
              'else: no preamble and no code fence. Your reply is saved as notes.md word for word. Link images '
              'as `frames/01-22.jpg`.\n\n')

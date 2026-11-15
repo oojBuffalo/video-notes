@@ -39,6 +39,16 @@ class TimeTests(unittest.TestCase):
             self.assertEqual(vnotes.parse_time(vnotes.stamp(seconds)), seconds)
 
 
+class IndexTests(unittest.TestCase):
+    def test_one_sheet_per_five_minutes_and_no_sheet_for_a_sliver(self):
+        self.assertEqual(vnotes.sheet_starts(591), [0, 300])
+        self.assertEqual(vnotes.sheet_starts(600), [0, 300])
+        self.assertEqual(vnotes.sheet_starts(603), [0, 300])
+        self.assertEqual(vnotes.sheet_starts(606), [0, 300, 600])
+        self.assertEqual(len(vnotes.sheet_starts(4920)), 17)
+        self.assertEqual(vnotes.sheet_starts(3), [0])
+
+
 class CaptionTests(unittest.TestCase):
     def test_caption_lines_join_words_and_skip_empty_events(self):
         data = {'events': [
@@ -61,7 +71,7 @@ class CaptionTests(unittest.TestCase):
                                        'en-orig': track('json3')}}
         self.assertEqual([label for label, _ in vnotes.pick_tracks(info)],
                          ['en (human)', 'en-GB (human)', 'en-orig (automatic)', 'en (automatic)'])
-        self.assertEqual(vnotes.pick_tracks(info)[0][1], 'u-json3')
+        self.assertEqual(vnotes.pick_tracks(info)[0][1], 'en')
 
     def test_tracks_without_json3_or_in_another_language_are_skipped(self):
         info = {'subtitles': {'en': track('vtt'), 'de': track('json3')}, 'automatic_captions': None}
