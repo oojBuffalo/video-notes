@@ -1,0 +1,11 @@
+# Round 3 findings (t12)
+
+**Wall clock.** Measured: 218 seconds from the first `yt-dlp` of this run until `notes.md` was on disk. Caption download 3.3 s, video URL 3.7 s, one 1080p frame 0.8 s. The rest was reading the transcript, looking, one retry, and writing. Over the 60 s goal. No model API was called.
+
+**Frames.** Measured: 15 JPEGs pulled, 11 kept in the notes. Chosen from the timed captions where a sentence needs a picture (arrows, the house column, origin, the −2/3 walk, the z-axis, tip-to-tail, the 1,2 + 3,−1 path, scale by 2, −1.8, and 2·[3,1]). Dropped after looking: 0:34 (arrow not yet the diagram), 3:58 (half-drawn brackets), 5:04 (sum not labeled yet), 7:21 (flip not drawn yet).
+
+**What broke.** Measured on this video only: a timestamp taken from the sentence often lands mid-animation. One nudge fixed addition and the negative scale; the nudge at 3:58 was worse than 3:52. Direct avc1 1080p worked; HLS was not needed. English json3 captions existed, so the transcribe branch was not run. Assumed: the same seek will miss on a video whose diagrams are not announced in the caption at that second.
+
+**Helper vs markdown.** The helper must ignore the user yt-dlp config, save timed captions (or audio if there are none), and save a JPEG at a timestamp the agent names, including one nudged retry. The markdown leaves choice of timestamps, looking, and the prose to the host agent. No notes API. Assumed gap: that helper cannot show a diagram the agent never names. A cheap contact sheet of the whole timeline belongs in the helper. This run had none, and the notes missed drawings the speech does not flag.
+
+**Against `runs/vectors/notes.md`.** Measured from the two files: theirs is 48 frames, images in an appendix, and it records drawings this run never opened (an algebra card near 1:57, a numeric 3D triple, a one-third shrink, a closing span card). Their saved run was 33.3 s (project README; not retimed here). Mine is slower, with fewer pictures, and the picture sits under the sentence. I do not print the sum column on the 6:21 frame because it is not on that JPEG; their note states (4, 1) from the path. I did not open their JPEGs, so I am not scoring their claims as true or false.
