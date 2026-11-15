@@ -1,0 +1,21 @@
+# t8 final review — skill-first
+
+Reviewed read-only on 2026-11-14: `worktrees/skill-first/vnotes`, `skill/SKILL.md`, `tests/test_vnotes.py`, and README. No implementation edits or subagents. Line numbers refer to the reviewed working-tree snapshot.
+
+## Findings, highest severity first
+
+1. **P1 — Headless restrictions do not enforce the advertised boundary.** `vnotes:445-451`; README “What the headless agent is allowed to do”. Codex `workspace-write` still permits model-generated shell commands; its installed `exec --help` explicitly describes sandbox policy as applying to those commands. Thus a malicious transcript can attempt shell execution, including deleting files in the writable output folder, despite the brief saying commands cannot run. Both launches also inherit configured tools: Claude blocks only three named built-ins, without excluding configured MCP tools; Codex disables sandbox network access without disabling configured remote tools. A previously authorized network-capable MCP tool remains a route the stated restriction does not close. Enforce the actual permitted tool set/configuration, or accurately describe the remaining authority; prompt text is not enforcement. **Verified:** launch arguments and installed CLI help. **Not demonstrated:** a live malicious transcript successfully inducing tool use.
+
+2. **P2 — A failed frame refresh destroys an existing usable image.** `vnotes:375-384`. Ask again for a timestamp already embedded in notes, then let every stream read fail (expired/blocked media or network outage). `path.unlink()` removes the existing image before any replacement succeeds, leaving broken notes. **Reproduced:** temporary `frames/00-10.jpg`, mocked failed stream reads, `frames(..., ["10"])` returned 1 and the previous file no longer existed. Write to a temporary file and replace only on successful nonempty output; the same preservation principle applies to the index directory deleted at `vnotes:278` before rebuilding.
+
+3. **P2 — A draft notes file takes precedence over an explicit pending frame request.** `vnotes:455-465`. A harness writes a partial notes.md with planned image links and frames-wanted.txt in its first turn, then exits normally. The helper returns success without fetching any requested images because it checks the notes mtime first. **Reproduced:** mocked harness wrote a draft with a nonexistent image and requested timestamp 10; notes() returned normally after one invocation and left the request unprocessed. Handle pending requests before accepting completion, and check local image references before declaring success.
+
+4. **P2 — Empty ASR output is accepted as a successful transcript.** `vnotes:321-329` (also `vnotes:258`). For a captionless spoken video where whisper returns successful JSON but no usable segments, fetch writes a one-byte newline transcript, reports zero lines and proceeds to notes generation. This silently drops the required audio evidence. **Reproduced:** mocked transcription returning [] caused fetch() to return normally and write that empty transcript. Reject an empty transcription with a clear error (or explicitly handle an intentionally silent video), rather than treating it as successful speech transcription.
+
+## Validation and fit
+
+- **Measured:** `python3 -B -m unittest discover -s tests -v` passed all 9 tests. These cover pure parsing/selection, not fetch failures or the headless lifecycle.
+- **Measured:** three isolated mock-based reproductions above ran in temporary directories; no real source, frame, or notes files were changed.
+- **Inspection:** the product is a Markdown skill plus CLI, has no model API calls, has no 60-second quality gate, and implements a whisper-cli fallback for missing captions. These match the revised decisions.
+- **Inspection:** normal extracted media stream URLs are not persisted in the selected metadata and subprocess stderr is URL-redacted. No actual signed-media leak was demonstrated in this review.
+- **Not checked:** live end-to-end Claude/Codex runs, live ASR, network downloads, or hostile-transcript exploit execution. There is a serious headless-isolation claim to fix before presenting this as the documented restricted mode; the other findings are reproducible reliability defects.

@@ -14,10 +14,20 @@ A small helper, `vnotes`, does the fixed work around it. There is no model API c
 
 You need Python 3, `yt-dlp` and `ffmpeg` on `PATH`. No Python packages are installed.
 
+Put the helper on `PATH`, from the root of this repository:
+
 ```sh
-ln -s "$PWD/vnotes" ~/.local/bin/vnotes                 # put the helper on PATH
-ln -s "$PWD/skill" ~/.claude/skills/video-notes         # optional: use the skill inside Claude Code
+ln -s "$PWD/vnotes" ~/.local/bin/vnotes
 ```
+
+That is enough for `vnotes notes`. To use the skill inside your own agent sessions as well, link the `skill/` folder into the agent's skills folder under the name `video-notes`:
+
+```sh
+ln -s "$PWD/skill" ~/.claude/skills/video-notes    # Claude Code
+ln -s "$PWD/skill" ~/.codex/skills/video-notes     # Codex
+```
+
+Each agent reads `SKILL.md` from that folder. Start a new session afterwards, then ask for notes on a video URL.
 
 A video without captions is transcribed from its audio. That needs `whisper-cli` (whisper.cpp) and a `ggml-*.bin` model file, found in `/usr/local/share/whisper/models` or named by `VNOTES_WHISPER_MODEL`.
 If the GPU is unavailable (for example inside a command sandbox), transcription is retried on the CPU, which took about three minutes for a ten-minute video here.
@@ -109,11 +119,13 @@ What the helper takes care of, so the agent does not have to get it right by luc
 skill/SKILL.md   the skill: what the agent does, step by step
 vnotes           the helper: one standard-library Python script
 tests/           checks for caption parsing, track choice, stream choice, time formats
-docs/            council reports and records from the earlier prototype
+docs/            validation.md (what was measured) and council/ (the reports behind it)
 runs/            generated notes (ignored by git)
 ```
 
 ## Development
+
+What has been measured, and what is still unproven, is in [docs/validation.md](docs/validation.md).
 
 ```sh
 python3 -m unittest discover -s tests -v
