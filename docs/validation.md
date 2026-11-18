@@ -112,7 +112,7 @@ Measured on Paper Club (4,902 s).
 
 ## 6. `vnotes direct`: request shapes
 
-No full run of `vnotes direct` is recorded here yet. What was tried is one small request per provider through `send()`: the question "What colour is this image?" with one 64 by 64 red JPEG.
+Section 7 has the first full run. Before it, one small request per provider was tried through `send()`: the question "What colour is this image?" with one 64 by 64 red JPEG.
 
 | `--via` | Model | Result |
 |---|---|---|
@@ -132,9 +132,35 @@ No full run of `vnotes direct` is recorded here yet. What was tried is one small
 - **After the review fixes** the `chatgpt` and free `openrouter` requests were repeated and both replied "Red" (5.3 s and 3.7 s), so both send the end mark that `vnotes` now requires.
 - **Sizes, worked out offline.** With a saved run of the Warp video, the plan request is 1.6 MB (5 index sheets) and the write request is 9.9 MB (40 frames). Neither was sent.
 
+## 7. `vnotes direct`: first full run
+
+Run by the coordinator (t1r) on Warp with `--via chatgpt`, before the prompt changes below. The figures are t1r's.
+
+| | `vnotes direct` (chatgpt, `gpt-6.2-sol`) | Agent run, t12 |
+|---|---:|---:|
+| Total time | 392 s | 584 s |
+| Frames pulled | 39 | 44 |
+| Images in notes | 8 | 27 |
+
+The run finished and every image link resolved, so the ChatGPT backend accepted the write request with 39 frames. The notes were weaker than t12's:
+
+- Facts that were on pulled frames did not reach the notes: the efficiency formula (the notes said the talk "does not prescribe those units"), "[Optional] Human code review", and the 62K stars and 800k+ figures.
+- Facts that t12 found on the index were missing: Same.dev's 600,000+ projects and the 932,409-lines callout.
+- The check step changed almost nothing. It was sent only the 8 linked frames, so it could not see what the draft had left out.
+- The closing line that says where the words came from was missing.
+
+What changed afterwards:
+
+- The write step is told to read every frame, to put every on-screen number, name, label and formula into the notes, and to give every content slide its image.
+- The check step is sent every pulled frame and is told to add missing on-screen facts and restore dropped images, as well as correct errors. Its request is now about as large as the write request.
+- The plan step is told which pictures to keep when the video has more than 40.
+- `vnotes` appends the closing source line itself.
+
+**These changes have not been run on a full video yet.**
+
 ## Still unproven
 
-- **`vnotes direct` end to end.** No full run was made, so nothing is known yet about its time, its notes, or whether each provider accepts a 10 MB request.
+- **`vnotes direct` after the prompt changes.** One full run was made before them, with `chatgpt` only. Whether the new prompts close the gaps above is not measured.
 - **`vnotes direct` with `openai`, `anthropic` and `endpoint`.** No request to any of them succeeded or was possible. The Chat Completions shape they share with `openrouter` did work there.
 - **`vnotes direct` with the default OpenRouter model.** Only a free model answered.
 

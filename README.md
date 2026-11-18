@@ -107,8 +107,8 @@ The steps:
 2. **Plan.** The model gets the transcript and every index sheet, and replies with an outline and up to 40 frame times. Saved as `plan.md`.
 3. **Frames.** `vnotes` pulls those frames at 1080p.
 4. **Write.** The model gets the transcript, its plan and every frame, and writes the notes. Saved as `draft.md`.
-5. **Check.** The model gets the draft, the transcript and the frames the draft links. It verifies every number, name, quote and on-screen text and returns corrected notes.
-6. **Save.** `notes.md` is written only if every image link points at a file. If not, the run fails, lists the links and leaves the text in `notes.rejected.md`.
+5. **Check.** The model gets the draft, the transcript and every frame again, linked or not. It corrects every number, name, quote and on-screen text, adds on-screen facts the draft missed, restores the image of a slide the text discusses, and returns the full notes.
+6. **Save.** `vnotes` appends a line saying where the words came from, how many index sheets and frames the model was sent, and which model wrote the notes. `notes.md` is written only if every image link points at a file. If not, the run fails, lists the links and leaves the text in `notes.rejected.md`.
 
 What to know before you use it:
 

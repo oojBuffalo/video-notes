@@ -60,27 +60,45 @@ Reply with two parts:
 1. `OUTLINE`: the sections the notes will have and, under each, the points, worked examples and caveats to cover.
 2. `FRAMES`: one line for each moment you want as a full-size frame, in time order, in exactly this form:
 `mm:ss | what the frame should show`
-Use `h:mm:ss` from one hour on. Ask for at most {MAX_FRAMES} frames. A program reads these lines, so put nothing \
-else on them.
+Use `h:mm:ss` from one hour on. A program reads these lines, so put nothing else on them.
+Ask for at most {MAX_FRAMES} frames. If the video has more pictures than that, keep the ones with the most text, \
+figures or structure, and drop near-repeats first. A slide you can see on the index but cannot read still counts: \
+its small print is read from the full-size frame.
 """
 WRITE = """Step: write the notes. Below are the writing rules, then meta.json, the transcript and your plan, then \
 the full-size frames that were pulled, each labelled with its file name and time.
 
-Check each frame against what you planned for it. Leave out a frame that is mid-animation, mid-transition or shows \
-something else, and say in the notes which planned picture could not be captured.
+Read every frame at full size before you write. Then:
+- Put into the notes every number, name, label, formula, quotation and other piece of on-screen text that the \
+transcript lacks. Copy it exactly and say it comes from the screen. Do this whether or not you keep the image itself.
+- Give every distinct slide, diagram, chart, table, equation and code screen that carries information its image, \
+directly after the text it supports. The rule below about keeping an image only when it adds what words cannot is \
+for talking heads, title cards and repeats of a picture already used. It is not a reason to drop a content slide.
+- Never write that the video does not state something that a frame states.
+- Leave out a frame that is mid-animation, mid-transition or does not show what was planned for it, and say in the \
+notes which planned picture could not be captured.
 
 Reply with the complete text of notes.md and nothing else: no preamble and no code fence. Link images as \
 `frames/01-22.jpg`, using only the file names given below.
 """
 CHECK = """Step: check the notes. Below are a draft of the notes, then meta.json and the transcript, then every \
-frame the draft links, each labelled with its file name.
+full-size frame that was pulled, each labelled with its file name and time, whether or not the draft uses it.
 
-Verify every number, name, quote, formula, unit and piece of on-screen text in the draft against the transcript and \
-the frames, and the direction of every comparison. Correct what is wrong. Remove what neither source supports. Check \
-that each section's timestamp link matches the transcript line where its topic starts. Keep everything else as it is.
+Go through the frames one by one and compare each with the draft. Then:
+1. Correct. Every number, name, quote, formula, unit and piece of on-screen text in the draft must match the \
+transcript and the frames, and so must the direction of every comparison. Rewrite a sentence that a frame \
+contradicts, for example one saying the video does not give something that a frame shows. Remove what neither \
+source supports.
+2. Add. Put in every number, name, label, formula and piece of on-screen text that a frame carries and the draft \
+lacks, copied exactly, in the section it belongs to, and say it comes from the screen.
+3. Restore. Where the text discusses a slide, diagram, chart, table, equation or code screen and a frame shows it \
+complete, the notes must link that frame directly after that text. Add the link if the draft left it out. Do not \
+add talking heads, title cards, repeats or frames caught mid-animation.
+4. Check that each section's timestamp link matches the transcript line where its topic starts.
+Keep everything else as it is.
 
 Reply with the complete corrected text of notes.md and nothing else: no preamble, no list of changes and no code \
-fence. Keep each image link unless its frame does not show what the text says.
+fence. Link images as `frames/01-22.jpg`, using only the file names given below.
 """
 
 
@@ -908,24 +926,22 @@ def direct(url, request, via, model, out):
         with contextlib.redirect_stdout(report):
             frames(out, [str(second) for second, _ in wanted], url)
     missed = [line for line in report.getvalue().splitlines() if line.startswith('Could not get')]
-    parts = [f'{WRITE}\n{skill_part(4)}\n{material}\n## Your plan\n\n{plan}\n\n' + '\n'.join(missed)]
+    pulled = []
     for second, what in wanted:
         frame = out / 'frames' / f"{stamp(second).replace(':', '-')}.jpg"
         if frame.is_file():
-            parts += [f'frames/{frame.name} at {stamp(second)}. Planned to show: {what}', frame]
-    print(f'Frames: {len(parts) // 2} of {len(wanted)} pulled, after {time.monotonic() - start:.0f} s.')
-    draft = send(via, model, SYSTEM, parts)
+            pulled += [f'frames/{frame.name} at {stamp(second)}. Planned to show: {what}', frame]
+    print(f'Frames: {len(pulled) // 2} of {len(wanted)} pulled, after {time.monotonic() - start:.0f} s.')
+    draft = send(via, model, SYSTEM, [
+        f'{WRITE}\n{skill_part(4)}\n{material}\n## Your plan\n\n{plan}\n\n' + '\n'.join(missed), *pulled])
     (out / 'draft.md').write_text(draft + '\n')
     print(f'Draft written, after {time.monotonic() - start:.0f} s. Saved as {out}/draft.md')
 
-    # only JPEG files that really sit in the frames folder are sent back, whatever path a link names
-    linked = sorted({link for link in IMAGE_LINK.findall(draft) if link.endswith('.jpg')
-                     and (out / link).resolve().parent == out / 'frames' and (out / link).is_file()})
-    parts = [f'{CHECK}\n## Draft of notes.md\n\n{draft}\n\n{material}']
-    for link in linked:
-        parts += [f'{link}:', out / link]
-    checked = send(via, model, SYSTEM, parts)
-    print(f'Draft checked against {len(linked)} frames, after {time.monotonic() - start:.0f} s.')
+    # the check sees every pulled frame, not only the linked ones, so it can notice what the draft left out
+    checked = send(via, model, SYSTEM, [f'{CHECK}\n## Draft of notes.md\n\n{draft}\n\n{material}', *pulled])
+    print(f'Draft checked against {len(pulled) // 2} frames, after {time.monotonic() - start:.0f} s.')
+    checked += (f"\n\n---\n\nWords: {meta.get('words')}. Index sheets sent to the model: {len(sheets)}. "
+                f'Frames pulled and sent: {len(pulled) // 2}. Written by {model} via {via} with `vnotes direct`.')
     missing = save_notes(out, checked)
     if missing:
         (out / 'notes.rejected.md').write_text(checked + '\n')

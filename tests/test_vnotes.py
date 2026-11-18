@@ -336,11 +336,10 @@ class DirectTests(unittest.TestCase):
     def run_direct(self, replies):
         """Runs `direct` on a fetched folder with a fake model and a fake frame puller."""
         out = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        (out / 'meta.json').write_text('{"duration": 100, "url": "u"}')
+        (out / 'meta.json').write_text('{"duration": 100, "url": "u", "words": "en (human)"}')
         (out / 'transcript.txt').write_text('[00:10] words\n')
         (out / 'index').mkdir()
         (out / 'index' / 'index-000m.jpg').write_bytes(b'jpg')
-        (out / 'private.jpg').write_bytes(b'jpg')
         calls, replies = [], iter(replies)
 
         def send(via, model, system, parts):
@@ -365,17 +364,18 @@ class DirectTests(unittest.TestCase):
     def test_steps_run_in_order_plan_frames_write_check_save(self):
         out, (plan, pulled, write, check) = self.run_direct([
             'OUTLINE\n1. Intro\nFRAMES\n00:10 | the diagram\n00:50 | a chart\n02:00 | past the end\n',
-            '# Draft\n\n![d](frames/00-10.jpg "a title") ![x](frames/../private.jpg) ![y](private.jpg)',
-            '# Notes\n\n![d](frames/00-10.jpg)'])
+            '# Draft with no image', '# Notes\n\n![d](frames/00-10.jpg)'])
         self.assertEqual(plan[1:], ['Index sheet index-000m.jpg, starting at 00:00:', out / 'index' / 'index-000m.jpg'])
         self.assertIn('focus on x', plan[0])
         self.assertEqual(pulled, (['10', '50'], 'trusted-url'))
         self.assertEqual(write[1:], ['frames/00-10.jpg at 00:10. Planned to show: the diagram',
                                      out / 'frames' / '00-10.jpg'])
         self.assertIn('Could not get 00:50', write[0])
-        self.assertIn('# Draft', check[0])
-        self.assertEqual(check[1:], ['frames/00-10.jpg:', out / 'frames' / '00-10.jpg'])
-        self.assertEqual((out / 'notes.md').read_text(), '# Notes\n\n![d](frames/00-10.jpg)\n')
+        self.assertIn('# Draft with no image', check[0])
+        self.assertEqual(check[1:], write[1:])  # every pulled frame goes to the check, linked or not
+        self.assertEqual((out / 'notes.md').read_text(), (
+            '# Notes\n\n![d](frames/00-10.jpg)\n\n---\n\nWords: en (human). Index sheets sent to the model: 1. '
+            'Frames pulled and sent: 1. Written by gpt-6.2-sol via openai with `vnotes direct`.\n'))
 
     def test_checked_notes_with_a_broken_image_link_are_not_saved(self):
         out, calls = self.run_direct(['FRAMES\n00:10 | the diagram\n', '# Draft', '![gone](frames/09-99.jpg)'])
