@@ -605,16 +605,19 @@ def local_images(text):
 
 
 def save_notes(out, text):
-    """Saves notes.md, unless it links to images that do not exist.
+    """Saves notes.md, unless it links to images that are not files inside the notes folder.
 
     Args:
         out: The notes folder.
         text: The complete notes.
 
     Returns:
-        The image links that point at no file. Empty when the notes were saved.
+        The image links that point at no file, or at one outside the folder.
+        Empty when the notes were saved.
     """
-    missing = sorted({target for target in local_images(text) if not (out / target).is_file()})
+    root = out.resolve()  # a link must not reach outside the folder, even to a file that exists
+    missing = sorted({target for target in local_images(text)
+                      if not ((root / target).resolve().is_relative_to(root) and (root / target).is_file())})
     if not missing:
         part = out / 'notes.md.part'
         part.write_text(text + '\n')
