@@ -136,14 +136,14 @@ Section 7 has the first full run. Before it, one small request per provider was 
 
 Run by the coordinator (t1r) on Warp with `--via chatgpt` (`gpt-6.2-sol`). The run times and the findings are t1r's. The agent run by t12 is the reference.
 
-| | Run 1 | Run 2 | Agent run, t12 |
-|---|---:|---:|---:|
-| Total time | 392 s | 662 s | 584 s |
-| Frames pulled | 39 | 38 | 44 |
-| Images in notes | 8 | 33 | 27 |
-| Words in notes | 1,916 | 4,883 | 2,680 |
+| | Run 1 | Run 2 | Run 3 | Agent run, t12 |
+|---|---:|---:|---:|---:|
+| Total time | 392 s | 662 s | 463 s | 584 s |
+| Frames pulled | 39 | 38 | 32 | 44 |
+| Images in notes | 8 | 33 | 29 | 27 |
+| Words in notes | 1,916 | 4,883 | 3,399 | 2,680 |
 
-Both runs finished and every image link resolved, so the ChatGPT backend accepted requests carrying 38 and 39 full-size frames.
+All three runs finished and every image link resolved, so the ChatGPT backend accepted requests carrying 32 to 39 full-size frames.
 
 **Run 1** left out what was on the frames.
 
@@ -168,12 +168,15 @@ Change after run 2:
 
 - The write and check steps now separate on-screen content that the talk teaches or claims (figures, formulas, definitions, diagram labels, named tools, a slide's own bullets, qualifiers such as `[Optional]`), which is carried over exactly, from incidental detail (interface chrome, every row of a list or dashboard, testimonial walls, avatars, slide numbers), which gets one sentence and at most one or two examples. The check step is told to cut such detail from a draft.
 
-**The change after run 2 has not been run on a full video yet.**
+**Run 3** was accepted by t1r.
+
+- Every reference fact was present, and the slides' own bullets were kept.
+- The dashboard rows, the interface chrome and the testimonial wall were gone.
+- The source line was present and every image link resolved.
 
 ## Still unproven
 
-- **`vnotes direct` after the last prompt change.** Two full runs were made, both with `chatgpt` and both on Warp. Whether the last change stops the over-transcription without losing the facts again is not measured.
-- **`vnotes direct` on any other video.** The prompts were tuned on one slide talk.
+- **`vnotes direct` on any other video.** The prompts were tuned on one slide talk, and all three full runs were on it, with `chatgpt` only.
 - **`vnotes direct` with `openai`, `anthropic` and `endpoint`.** No request to any of them succeeded or was possible. The Chat Completions shape they share with `openrouter` did work there.
 - **`vnotes direct` with the default OpenRouter model.** Only a free model answered.
 
