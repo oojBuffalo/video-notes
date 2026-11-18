@@ -132,35 +132,48 @@ Section 7 has the first full run. Before it, one small request per provider was 
 - **After the review fixes** the `chatgpt` and free `openrouter` requests were repeated and both replied "Red" (5.3 s and 3.7 s), so both send the end mark that `vnotes` now requires.
 - **Sizes, worked out offline.** With a saved run of the Warp video, the plan request is 1.6 MB (5 index sheets) and the write request is 9.9 MB (40 frames). Neither was sent.
 
-## 7. `vnotes direct`: first full run
+## 7. `vnotes direct`: full runs
 
-Run by the coordinator (t1r) on Warp with `--via chatgpt`, before the prompt changes below. The figures are t1r's.
+Run by the coordinator (t1r) on Warp with `--via chatgpt` (`gpt-6.2-sol`). The run times and the findings are t1r's. The agent run by t12 is the reference.
 
-| | `vnotes direct` (chatgpt, `gpt-6.2-sol`) | Agent run, t12 |
-|---|---:|---:|
-| Total time | 392 s | 584 s |
-| Frames pulled | 39 | 44 |
-| Images in notes | 8 | 27 |
+| | Run 1 | Run 2 | Agent run, t12 |
+|---|---:|---:|---:|
+| Total time | 392 s | 662 s | 584 s |
+| Frames pulled | 39 | 38 | 44 |
+| Images in notes | 8 | 33 | 27 |
+| Words in notes | 1,916 | 4,883 | 2,680 |
 
-The run finished and every image link resolved, so the ChatGPT backend accepted the write request with 39 frames. The notes were weaker than t12's:
+Both runs finished and every image link resolved, so the ChatGPT backend accepted requests carrying 38 and 39 full-size frames.
 
-- Facts that were on pulled frames did not reach the notes: the efficiency formula (the notes said the talk "does not prescribe those units"), "[Optional] Human code review", and the 62K stars and 800k+ figures.
+**Run 1** left out what was on the frames.
+
+- Facts on pulled frames did not reach the notes: the efficiency formula (the notes said the talk "does not prescribe those units"), "[Optional] Human code review", and the 62K stars and 800k+ figures.
 - Facts that t12 found on the index were missing: Same.dev's 600,000+ projects and the 932,409-lines callout.
 - The check step changed almost nothing. It was sent only the 8 linked frames, so it could not see what the draft had left out.
 - The closing line that says where the words came from was missing.
 
-What changed afterwards:
+Changes after run 1:
 
-- The write step is told to read every frame, to put every on-screen number, name, label and formula into the notes, and to give every content slide its image.
-- The check step is sent every pulled frame and is told to add missing on-screen facts and restore dropped images, as well as correct errors. Its request is now about as large as the write request.
-- The plan step is told which pictures to keep when the video has more than 40.
+- The write step was told to read every frame, to put every on-screen number, name, label and formula into the notes, and to give every content slide its image.
+- The check step is sent every pulled frame and was told to add missing on-screen facts and restore dropped images, as well as correct errors. Its request is now about as large as the write request.
+- The plan step was told which pictures to keep when the video has more than 40.
 - `vnotes` appends the closing source line itself.
 
-**These changes have not been run on a full video yet.**
+**Run 2** fixed that and went too far the other way.
+
+- Every reference fact was present, and so was the source line. On-screen text that t1r compared with `frames/05-20.jpg` was exact.
+- The notes transcribed incidental detail: every issue row, issue number and contributor count from a dashboard, interface chrome ("Docs", "Sign Up", "Log In"), and all eight testimonial cards in full. They ran to 4,883 words against 2,680 in the reference.
+
+Change after run 2:
+
+- The write and check steps now separate on-screen content that the talk teaches or claims (figures, formulas, definitions, diagram labels, named tools, a slide's own bullets, qualifiers such as `[Optional]`), which is carried over exactly, from incidental detail (interface chrome, every row of a list or dashboard, testimonial walls, avatars, slide numbers), which gets one sentence and at most one or two examples. The check step is told to cut such detail from a draft.
+
+**The change after run 2 has not been run on a full video yet.**
 
 ## Still unproven
 
-- **`vnotes direct` after the prompt changes.** One full run was made before them, with `chatgpt` only. Whether the new prompts close the gaps above is not measured.
+- **`vnotes direct` after the last prompt change.** Two full runs were made, both with `chatgpt` and both on Warp. Whether the last change stops the over-transcription without losing the facts again is not measured.
+- **`vnotes direct` on any other video.** The prompts were tuned on one slide talk.
 - **`vnotes direct` with `openai`, `anthropic` and `endpoint`.** No request to any of them succeeded or was possible. The Chat Completions shape they share with `openrouter` did work there.
 - **`vnotes direct` with the default OpenRouter model.** Only a free model answered.
 

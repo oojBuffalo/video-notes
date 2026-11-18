@@ -69,8 +69,13 @@ WRITE = """Step: write the notes. Below are the writing rules, then meta.json, t
 the full-size frames that were pulled, each labelled with its file name and time.
 
 Read every frame at full size before you write. Then:
-- Put into the notes every number, name, label, formula, quotation and other piece of on-screen text that the \
-transcript lacks. Copy it exactly and say it comes from the screen. Do this whether or not you keep the image itself.
+- Carry over the on-screen content that is part of what the video teaches or claims and that the transcript \
+lacks: figures, formulas, definitions, diagram labels and structure, named tools and products, a slide's own bullet \
+text, and qualifiers such as `[Optional]`. Copy it exactly and say it comes from the screen. Do this whether or not \
+you keep the image itself.
+- Do not transcribe incidental detail: interface chrome and navigation, every row of a list, table or dashboard, a \
+whole wall of testimonials, avatars, slide numbers. Say in one sentence what such a screen shows and give at most \
+one or two representative items. These are study notes, not a copy of the screen.
 - Give every distinct slide, diagram, chart, table, equation and code screen that carries information its image, \
 directly after the text it supports. The rule below about keeping an image only when it adds what words cannot is \
 for talking heads, title cards and repeats of a picture already used. It is not a reason to drop a content slide.
@@ -89,12 +94,17 @@ Go through the frames one by one and compare each with the draft. Then:
 transcript and the frames, and so must the direction of every comparison. Rewrite a sentence that a frame \
 contradicts, for example one saying the video does not give something that a frame shows. Remove what neither \
 source supports.
-2. Add. Put in every number, name, label, formula and piece of on-screen text that a frame carries and the draft \
-lacks, copied exactly, in the section it belongs to, and say it comes from the screen.
-3. Restore. Where the text discusses a slide, diagram, chart, table, equation or code screen and a frame shows it \
+2. Add. Where a frame carries content that is part of what the video teaches or claims and the draft lacks it, \
+put it in, copied exactly, in the section it belongs to, and say it comes from the screen. That means figures, \
+formulas, definitions, diagram labels and structure, named tools and products, a slide's own bullet text, and \
+qualifiers such as `[Optional]`.
+3. Cut. Where the draft transcribes incidental detail, replace it with one sentence saying what the screen shows and \
+at most one or two representative items. Incidental detail is interface chrome and navigation, every row of a list, \
+table or dashboard, a whole wall of testimonials, avatars and slide numbers.
+4. Restore. Where the text discusses a slide, diagram, chart, table, equation or code screen and a frame shows it \
 complete, the notes must link that frame directly after that text. Add the link if the draft left it out. Do not \
 add talking heads, title cards, repeats or frames caught mid-animation.
-4. Check that each section's timestamp link matches the transcript line where its topic starts.
+5. Check that each section's timestamp link matches the transcript line where its topic starts.
 Keep everything else as it is.
 
 Reply with the complete corrected text of notes.md and nothing else: no preamble, no list of changes and no code \
