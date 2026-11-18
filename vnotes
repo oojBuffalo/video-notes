@@ -486,7 +486,9 @@ def ask(agent, message, out):
                                   cwd=out, input=message, stdout=subprocess.DEVNULL, text=True)
             reply = last.read_text() if last.is_file() else ''
     if done.returncode or not reply.strip():
-        raise Fail(f'{agent} gave no reply (exit code {done.returncode}).')
+        # the harness prints its own error (login, refusal, rate limit) where the reply would be
+        said = ' It said: ' + ' '.join(reply.split())[:300] if reply.strip() else ''
+        raise Fail(f'{agent} gave no reply (exit code {done.returncode}).{said}')
     return reply.strip()
 
 
@@ -518,9 +520,9 @@ def notes(url, request, agent, out):
              f'{sheets}\n\n'
              'A program reads your reply, in one of two ways:\n'
              '- To get frames (step 3), make the first line of your reply `FRAMES:` followed by the times, for '
-             'example `FRAMES: 1:22 3:54 12:40`. Under that line write notes to yourself: what you have worked '
-             'out and why you want each frame. You will be started again as a fresh session and given those '
-             'notes and the frames. Ask for the bracketing call the same way.\n'
+             'example `FRAMES: 1:22 3:54 12:40`. Under that line write a handover: the outline of the notes '
+             'so far and what each requested frame should show. A fresh session will be given that handover '
+             'and the frames. Ask for the bracketing call the same way.\n'
              '- When the notes are finished (step 4), reply with the complete text of notes.md and nothing '
              'else: no preamble and no code fence. Your reply is saved as notes.md word for word. Link images '
              'as `frames/01-22.jpg`.\n\n')
