@@ -36,8 +36,6 @@ CODEX_OFF = ('shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', '
              'skill_search', 'tool_suggest', 'multi_agent', 'goals', 'sleep_tool')
 FIT = 'scale={0}:{1}:force_original_aspect_ratio=decrease,pad={0}:{1}:(ow-iw)/2:(oh-ih)/2'
 SKILL = Path(__file__).resolve().parent / 'skill' / 'SKILL.md'
-# an image file named as a Markdown link target: `](path.jpg)`, `](path.png "title")` or `[id]: path.webp`
-IMAGE_LINK = re.compile(r'(?:\]\(\s*<?|^ {0,3}\[[^\]\n]+\]:\s*<?)([^\s)>]+\.(?:jpe?g|png|webp|gif))\b', re.I | re.M)
 # `vnotes direct`: where each --via posts, and the model it uses unless --model names another.
 # The model ids were read from the providers' model lists on 2026-11-17.
 URLS = {'chatgpt': 'https://chatgpt.com/backend-api/codex/responses',
@@ -585,6 +583,27 @@ def ask(agent, message, out):
     return reply.strip()
 
 
+def local_images(text):
+    """Lists the local file that each Markdown image in the text points at.
+
+    Args:
+        text: Markdown.
+
+    Returns:
+        The complete destination of every image, inline or reference-style,
+        leaving out destinations with a URL scheme such as `https:`.
+    """
+    # ponytail: alt text with a `]` inside it, and a destination with a `)` inside it, are not parsed.
+    # Use a Markdown parser if notes ever need those.
+    place = r'(?:<([^<>\n]*)>|([^\s<)][^\s)]*))'  # `<a path with spaces>` or a path without spaces
+    found = [angled or plain for angled, plain in re.findall(r'!\[[^\]]*\]\(\s*' + place, text)]
+    defined = {label.strip().lower(): angled or plain
+               for label, angled, plain in re.findall(r'^ {0,3}\[([^\]\n]+)\]:\s*' + place, text, re.M)}
+    for alt, label in re.findall(r'!\[([^\]]*)\](?:\[([^\]]*)\])?(?!\()', text):  # ![alt][label], ![alt][], ![alt]
+        found.append(defined.get((label or alt).strip().lower()))
+    return [target for target in found if target and not re.match(r'[a-z][a-z0-9+.-]*:', target, re.I)]
+
+
 def save_notes(out, text):
     """Saves notes.md, unless it links to images that do not exist.
 
@@ -595,8 +614,7 @@ def save_notes(out, text):
     Returns:
         The image links that point at no file. Empty when the notes were saved.
     """
-    missing = sorted({link for link in IMAGE_LINK.findall(text)
-                      if not re.match(r'[a-z][a-z0-9+.-]*:', link, re.I) and not (out / link).is_file()})
+    missing = sorted({target for target in local_images(text) if not (out / target).is_file()})
     if not missing:
         part = out / 'notes.md.part'
         part.write_text(text + '\n')

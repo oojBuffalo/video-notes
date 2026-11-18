@@ -138,13 +138,17 @@ class FailureTests(unittest.TestCase):
 class LinkTests(unittest.TestCase):
     def test_every_local_image_target_is_checked_and_web_images_are_not(self):
         out = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        (out / 'here.jpg').write_bytes(b'jpg')
+        for name in ('here.jpg', 'with space.jpg'):
+            (out / name).write_bytes(b'jpg')
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
-        text = ('![a](here.jpg) ![b](here.jpg "a title") ![web](https://x.test/far.png) [doc](other.md)\n'
-                '![c](gone.png) ![d](titled.jpg "a title") ![e](<angle.JPEG>) ![f][ref] [g](linked.gif)\n\n'
-                '[ref]: defined.webp "a title"\n')
-        self.assertEqual(vnotes.save_notes(out, text),
-                         ['angle.JPEG', 'defined.webp', 'gone.png', 'linked.gif', 'titled.jpg'])
+        text = ('![a](here.jpg) ![b](here.jpg "a title") ![s](<with space.jpg>) ![r][Ok] ![ok] '
+                '![web](https://x.test/far.png) [a plain link](other.jpg) ![not an image]\n'
+                '![c](gone.png) ![d](titled.jpg "a title") ![e](<frames/missing image.jpg>) ![f](frames/missing.svg) '
+                '![g](here.jpg.backup) ![h][ref] ![logo][]\n\n'
+                '[ok]: here.jpg\n[ref]: defined.webp "a title"\n[Logo]: <logo file.png>\n')
+        self.assertEqual(vnotes.save_notes(out, text), [
+            'defined.webp', 'frames/missing image.jpg', 'frames/missing.svg', 'gone.png', 'here.jpg.backup',
+            'logo file.png', 'titled.jpg'])
         self.assertFalse((out / 'notes.md').exists())
         self.assertEqual(vnotes.save_notes(out, text.splitlines()[0]), [])
         self.assertTrue((out / 'notes.md').exists())
