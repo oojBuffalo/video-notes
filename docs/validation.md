@@ -1,7 +1,7 @@
 # Validation
 
 What was measured for the skill-first tool, and what was not.
-Every number here comes from a run on one machine on 2026-11-14. Nothing here is a guarantee of speed or quality.
+Every number here comes from a run on one machine on 2026-11-14, except section 6, which is from 2026-11-17. Nothing here is a guarantee of speed or quality.
 The reports behind each number are in [`council/`](council/).
 
 The earlier prototype (a fixed pipeline that called model APIs) was removed. Its saved times were 33.3 s, 38.0 s and 49.2 s for the three videos below; they are quoted only as the baseline.
@@ -107,10 +107,35 @@ Measured on Paper Club (4,902 s).
 ## 5. Review and tests
 
 - t8 reviewed the code and reported four findings; three were reproduced with mocks. All four are fixed.
-- 15 unit tests pass: time formats, caption parsing, track choice, stream choice, sheet count, keeping a frame or index when a refresh fails, refusing an empty transcription, serving a frame request before saving notes, and not saving notes that link to missing images.
-- The tests do not touch the network or a real agent.
+- 26 unit tests pass: time formats, caption parsing, track choice, stream choice, sheet count, keeping a frame or index when a refresh fails, refusing an empty transcription, serving a frame request before saving notes, and not saving notes that link to missing images. For `vnotes direct`: the three request bodies, reading the three reply streams, a cut-off or refused reply, the frame-line parser, missing credentials, the step order with a fake model, and a retry and a refusal against a local fake server.
+- The tests do not touch the network or a real agent. The two fake-server tests are skipped where a local port cannot be opened.
+
+## 6. `vnotes direct`: request shapes
+
+No full run of `vnotes direct` is recorded here yet. What was tried is one small request per provider through `send()`: the question "What colour is this image?" with one 64 by 64 red JPEG.
+
+| `--via` | Model | Result |
+|---|---|---|
+| `chatgpt` | `gpt-6.2-sol` | replied "Red" in 4.5 s |
+| `openrouter` | `nvidia/nemotron-3.5-super-vl:free` | replied "Red" in 10.3 s |
+| `openrouter` | `openai/gpt-6.2-sol` (the default) | refused, 403: the key in this environment has reached its spending limit |
+| `openrouter` | `google/gemma-4-31b-it:free` | 429 from the upstream provider on all four tries (waits of 5, 20 and 60 s) |
+| `openai` | `gpt-6.2-sol` | refused, 401: the key in this environment is not valid |
+| `anthropic` | `claude-opus-5-5` | local fake server only: no key is set |
+
+- **How the ChatGPT request was worked out.** The installed codex 0.169.0 was run against a local recorder. That showed its headers (`Authorization`, `chatgpt-account-id`, `originator`, `User-Agent`) on its side calls. It did not show the model request, because codex will not send that over plain HTTP, so the body fields were read from the codex source at tag `rust-v0.169.0`. A body with only `model`, `stream`, `store: false`, `reasoning` and `input` (one developer message, one user message) was accepted with the two credential headers and `User-Agent: vnotes`. No `originator` header is sent.
+- **Model ids.**
+  - `chatgpt`: the backend's own model list for this account puts `gpt-6.2-sol` first, with text and image input.
+  - `openrouter`: `openai/gpt-6.2-sol` is in OpenRouter's public model list.
+  - `openai`: the model list could not be read (401). The id is the one the other two lists use.
+  - `anthropic`: the id comes from Anthropic's published model table, not from a live list.
+- **Sizes, worked out offline.** With a saved run of the Warp video, the plan request is 1.6 MB (5 index sheets) and the write request is 9.9 MB (40 frames). Neither was sent.
 
 ## Still unproven
+
+- **`vnotes direct` end to end.** No full run was made, so nothing is known yet about its time, its notes, or whether each provider accepts a 10 MB request.
+- **`vnotes direct` with `openai`, `anthropic` and `endpoint`.** No request to any of them succeeded or was possible. The Chat Completions shape they share with `openrouter` did work there.
+- **`vnotes direct` with the default OpenRouter model.** Only a free model answered.
 
 - **HLS fallback.** It worked in 1 of 4 attempts. The direct stream carried every successful run.
 - **Transcription on the GPU.** Never completed here. A long video without captions has not been run at all.

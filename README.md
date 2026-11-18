@@ -6,7 +6,8 @@ Turn a video URL into study notes with the video's diagrams, slides and code pla
 
 The product is an agent skill: [`skill/SKILL.md`](skill/SKILL.md).
 An agent you already pay for (Claude Code, Codex) reads the transcript, looks at the video's pictures itself and writes the notes.
-A small helper, `vnotes`, does the fixed work around it. There is no model API code here and no API key to set.
+A small helper, `vnotes`, does the fixed work around it. The skill and `vnotes notes` need no API key.
+A second route, [`vnotes direct`](#fixed-steps-without-an-agent-vnotes-direct), calls a model itself in fixed steps.
 
 ## Setup
 
@@ -82,6 +83,45 @@ What this does **not** guarantee:
 
 Inside your own interactive session the skill runs `vnotes frames` directly, under whatever permissions that session has. None of the above applies there.
 
+## Fixed steps without an agent: `vnotes direct`
+
+`vnotes notes` starts an agent and lets it choose the steps. `vnotes direct` fixes the steps in code and calls the model itself, three times. It puts accuracy before speed.
+
+```sh
+vnotes direct 'https://www.youtube.com/watch?v=tUPPVhBBcoM' --via chatgpt --out runs/my-video
+```
+
+| `--via` | Credential | Default model |
+|---|---|---|
+| `chatgpt` | the login Codex saved in `~/.codex/auth.json` (read, never written) | `gpt-6.2-sol` |
+| `openai` | `OPENAI_API_KEY` | `gpt-6.2-sol` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-6.2-sol` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5-5` |
+| `endpoint` | `VNOTES_BASE_URL` (an OpenAI-compatible `/v1` address) and, if the server wants one, `VNOTES_API_KEY` | none: give `--model` |
+
+`--model` picks another model, `--prompt` says what you want from the notes, and `--out` names the folder.
+
+The steps:
+
+1. **Fetch** the transcript and index sheets, as `vnotes fetch` does.
+2. **Plan.** The model gets the transcript and every index sheet, and replies with an outline and up to 40 frame times. Saved as `plan.md`.
+3. **Frames.** `vnotes` pulls those frames at 1080p.
+4. **Write.** The model gets the transcript, its plan and every frame, and writes the notes. Saved as `draft.md`.
+5. **Check.** The model gets the draft, the transcript and the frames the draft links. It verifies every number, name, quote and on-screen text and returns corrected notes.
+6. **Save.** `notes.md` is written only if every image link points at a file. If not, the run fails, lists the links and leaves the text in `notes.rejected.md`.
+
+What to know before you use it:
+
+- The model has no tools in any step. A hostile transcript can change the text of the notes and nothing else.
+- The transcript and the frames are sent to the provider you chose. API keys are billed by that provider. `chatgpt` uses your ChatGPT plan's quota.
+- `chatgpt` does not renew the login. If it is refused, run `codex` once and try again.
+- A busy or failing server is retried three times, after 5, 20 and 60 seconds.
+- Reasoning effort is set to high for `chatgpt`, `openai`, `openrouter` and `anthropic`. A model that does not accept that setting refuses the request.
+- A frame that misses its slide is left out. This route has no second call to retake it, unlike the skill.
+- Claude and Gemini subscriptions are not offered, because their terms do not allow the login in other programs.
+
+What was tried and what was not is in [docs/validation.md](docs/validation.md).
+
 ## Commands
 
 | Command | Writes |
@@ -90,6 +130,7 @@ Inside your own interactive session the skill runs `vnotes frames` directly, und
 | `vnotes fetch --transcribe URL DIR` | the same, with the audio transcribed even when captions exist |
 | `vnotes frames DIR TIME...` | `frames/MM-SS.jpg` at 1080p and `frames/sheet-NN.jpg` contact sheets; times are seconds, `mm:ss` or `h:mm:ss` |
 | `vnotes notes URL [--prompt TEXT] [--agent claude\|codex] [--out DIR]` | everything above, then `notes.md` from the agent's reply |
+| `vnotes direct URL --via PROVIDER [--model M] [--prompt TEXT] [--out DIR]` | everything above, `plan.md`, `draft.md`, then `notes.md` from three model calls |
 
 What the helper takes care of, so the agent does not have to get it right by luck:
 
@@ -116,7 +157,7 @@ What the helper takes care of, so the agent does not have to get it right by luc
 ```
 skill/SKILL.md   the skill: what the agent does, step by step
 vnotes           the helper: one standard-library Python script
-tests/           checks for caption parsing, track choice, stream choice, time formats
+tests/           checks for parsing, track and stream choice, failure handling, and the direct route's requests and step order
 docs/            validation.md (what was measured) and council/ (the reports behind it)
 runs/            generated notes (ignored by git)
 ```
