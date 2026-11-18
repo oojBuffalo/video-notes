@@ -8,8 +8,6 @@ The product is an agent skill: [`skill/SKILL.md`](skill/SKILL.md).
 An agent you already pay for (Claude Code, Codex) reads the transcript, looks at the video's pictures itself and writes the notes.
 A small helper, `vnotes`, does the fixed work around it. There is no model API code here and no API key to set.
 
-[Setup](#setup) · [Usage](#usage) · [How it works](#how-it-works) · [Commands](#commands) · [Limits](#limits) · [Development](#development)
-
 ## Setup
 
 You need Python 3, `yt-dlp` and `ffmpeg` on `PATH`. No Python packages are installed.
