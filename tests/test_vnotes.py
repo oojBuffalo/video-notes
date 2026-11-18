@@ -1,9 +1,11 @@
 """Checks for the logic in vnotes that does not need the network."""
 import contextlib
+import http.server
 import io
 import json
 import math
 import tempfile
+import threading
 import unittest
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
@@ -164,6 +166,178 @@ class HeadlessTests(unittest.TestCase):
             vnotes.notes('u', None, 'codex', None)
         self.assertFalse((self.out / 'notes.md').exists())
         self.assertIn('frames/09-99.jpg', ask.call_args_list[1].args[1])
+
+
+class RequestTests(unittest.TestCase):
+    """The three request shapes carry the same instruction, text and picture."""
+
+    def setUp(self):
+        self.image = Path(self.enterContext(tempfile.TemporaryDirectory()), 'a.jpg')
+        self.image.write_bytes(b'jpg')  # base64: anBn
+
+    def test_responses_body_for_the_chatgpt_login(self):
+        body = vnotes.responses_body('m', 'rules', ['look', self.image])
+        self.assertEqual((body['model'], body['stream'], body['store']), ('m', True, False))
+        self.assertEqual(body['input'][0], {'type': 'message', 'role': 'developer',
+                                            'content': [{'type': 'input_text', 'text': 'rules'}]})
+        self.assertEqual(body['input'][1]['content'], [
+            {'type': 'input_text', 'text': 'look'},
+            {'type': 'input_image', 'image_url': 'data:image/jpeg;base64,anBn'}])
+        self.assertNotIn('tools', body)
+
+    def test_chat_body_for_openai_compatible_servers(self):
+        body = vnotes.chat_body('m', 'rules', ['look', self.image])
+        self.assertEqual(body['messages'][0], {'role': 'system', 'content': 'rules'})
+        self.assertEqual(body['messages'][1]['content'], [
+            {'type': 'text', 'text': 'look'},
+            {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,anBn'}}])
+        self.assertNotIn('tools', body)
+
+    def test_messages_body_for_anthropic(self):
+        body = vnotes.messages_body('m', 'rules', ['look', self.image])
+        self.assertEqual((body['system'], body['stream']), ('rules', True))
+        self.assertEqual(body['messages'], [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'look'},
+            {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': 'anBn'}}]}])
+        self.assertNotIn('tools', body)
+
+    def test_reply_text_reads_all_three_streams(self):
+        streams = [
+            [b'event: x\n', b'data: {"type":"response.output_text.delta","delta":"Hel"}\n',
+             b'data: {"type":"response.output_text.delta","delta":"lo"}\n', b'data: {"type":"response.completed"}\n'],
+            [b': keep-alive\n', b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n',
+             b'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}\n', b'data: [DONE]\n'],
+            [b'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hm"}}\n',
+             b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}\n',
+             b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n'],
+        ]
+        for stream in streams:
+            self.assertEqual(vnotes.reply_text(stream), 'Hello')
+
+    def test_a_cut_off_refused_or_failed_reply_is_an_error(self):
+        for line in (b'data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":"length"}]}\n',
+                     b'data: {"type":"message_delta","delta":{"stop_reason":"refusal"}}\n',
+                     b'data: {"type":"response.failed","response":{"error":{"message":"boom"}}}\n',
+                     b'data: {"type":"response.completed"}\n'):
+            with self.assertRaises(vnotes.Fail):
+                vnotes.reply_text([b'data: {"type":"response.output_text.delta","delta":""}\n', line])
+
+
+class FakeServer(http.server.BaseHTTPRequestHandler):
+    """Stands in for Anthropic: busy on the first request, then a streamed reply."""
+
+    seen = []
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['content-length'])))
+        self.seen.append((self.headers, body))  # header names compare without case
+        if len(self.seen) == 1:
+            self.send_response(529)
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"busy, key sk-ant-secret at https://x.test/y"}}')
+            return
+        self.send_response(200 if body['model'] != 'missing' else 404)
+        self.end_headers()
+        self.wfile.write(b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Red"}}\n\n'
+                         if body['model'] != 'missing' else b'no such model; you sent sk-ant-secret')
+
+    def log_message(self, *args):
+        pass
+
+
+class SendTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            server = http.server.HTTPServer(('127.0.0.1', 0), FakeServer)
+        except PermissionError:
+            self.skipTest('this sandbox does not allow listening on a local port')
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        FakeServer.seen = []
+        self.enterContext(patch.dict(vnotes.URLS, anthropic=f'http://127.0.0.1:{server.server_port}/v1/messages'))
+        self.enterContext(patch.dict(vnotes.os.environ, ANTHROPIC_API_KEY='sk-ant-secret'))
+        self.enterContext(patch.object(vnotes.time, 'sleep'))
+        self.enterContext(contextlib.redirect_stderr(io.StringIO()))
+
+    def test_send_signs_the_request_retries_when_busy_and_returns_the_reply(self):
+        self.assertEqual(vnotes.send('anthropic', 'claude-opus-5-5', 'rules', ['look']), 'Red')
+        headers, body = FakeServer.seen[1]
+        self.assertEqual((headers['x-api-key'], headers['anthropic-version']), ('sk-ant-secret', '2026-10-21'))
+        self.assertEqual((body['system'], body['messages'][0]['content'][0]['text']), ('rules', 'look'))
+        self.assertEqual(len(FakeServer.seen), 2)
+
+    def test_a_refused_request_fails_once_without_showing_the_key_or_an_address(self):
+        FakeServer.seen = [None]
+        with self.assertRaises(vnotes.Fail) as caught:
+            vnotes.send('anthropic', 'missing', 'rules', ['look'])
+        self.assertIn('404', str(caught.exception))
+        self.assertNotIn('sk-ant', str(caught.exception))
+        self.assertEqual(len(FakeServer.seen), 2)
+
+
+class DirectTests(unittest.TestCase):
+    def test_frame_lines_read_times_and_ignore_everything_else(self):
+        plan = ('OUTLINE\n1. Intro | not a frame\n| 12 | a table row |\n\nFRAMES\n'
+                '01:22 | the loop diagram\n- `0:45 | title formula`\n[1:01:22] | late chart\n01:22 | a repeat\n')
+        self.assertEqual(vnotes.frame_lines(plan),
+                         [(45, 'title formula'), (82, 'the loop diagram'), (3682, 'late chart')])
+
+    def test_missing_credentials_stop_the_run_before_the_fetch(self):
+        with patch.dict(vnotes.os.environ, clear=True), patch.object(vnotes, 'fetch') as fetch:
+            for via, model in (('openai', None), ('openrouter', None), ('anthropic', None), ('endpoint', 'm')):
+                with self.assertRaises(vnotes.Fail):
+                    vnotes.direct('u', None, via, model, None)
+            with patch.object(vnotes, 'CODEX_AUTH', Path('/nonexistent/auth.json')), self.assertRaises(vnotes.Fail):
+                vnotes.direct('u', None, 'chatgpt', None, None)
+        fetch.assert_not_called()
+
+    def run_direct(self, replies):
+        """Runs `direct` on a fetched folder with a fake model and a fake frame puller."""
+        out = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        (out / 'meta.json').write_text('{"duration": 100, "url": "u"}')
+        (out / 'transcript.txt').write_text('[00:10] words\n')
+        (out / 'index').mkdir()
+        (out / 'index' / 'index-000m.jpg').write_bytes(b'jpg')
+        calls, replies = [], iter(replies)
+
+        def send(via, model, system, parts):
+            calls.append(parts)
+            return next(replies)
+
+        def pull(folder, times, url):
+            calls.append((times, url))
+            (folder / 'frames').mkdir()
+            (folder / 'frames' / '00-10.jpg').write_bytes(b'jpg')
+            print('Could not get 00:50 (boom)')
+
+        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        with patch.object(vnotes, 'fetch', return_value=out), patch.object(vnotes, 'send', send), \
+                patch.object(vnotes, 'frames', pull), patch.dict(vnotes.os.environ, OPENAI_API_KEY='k'):
+            try:
+                vnotes.direct('trusted-url', 'focus on x', 'openai', None, None)
+            except vnotes.Fail as error:
+                calls.append(error)
+        return out, calls
+
+    def test_steps_run_in_order_plan_frames_write_check_save(self):
+        out, (plan, pulled, write, check) = self.run_direct([
+            'OUTLINE\n1. Intro\nFRAMES\n00:10 | the diagram\n00:50 | a chart\n02:00 | past the end\n',
+            '# Draft\n\n![d](frames/00-10.jpg) ![x](../meta.jpg)', '# Notes\n\n![d](frames/00-10.jpg)'])
+        self.assertEqual(plan[1:], ['Index sheet index-000m.jpg, starting at 00:00:', out / 'index' / 'index-000m.jpg'])
+        self.assertIn('focus on x', plan[0])
+        self.assertEqual(pulled, (['10', '50'], 'trusted-url'))
+        self.assertEqual(write[1:], ['frames/00-10.jpg at 00:10. Planned to show: the diagram',
+                                     out / 'frames' / '00-10.jpg'])
+        self.assertIn('Could not get 00:50', write[0])
+        self.assertIn('# Draft', check[0])
+        self.assertEqual(check[1:], ['frames/00-10.jpg:', out / 'frames' / '00-10.jpg'])
+        self.assertEqual((out / 'notes.md').read_text(), '# Notes\n\n![d](frames/00-10.jpg)\n')
+
+    def test_checked_notes_with_a_broken_image_link_are_not_saved(self):
+        out, calls = self.run_direct(['FRAMES\n00:10 | the diagram\n', '# Draft', '![gone](frames/09-99.jpg)'])
+        self.assertIn('frames/09-99.jpg', str(calls[-1]))
+        self.assertFalse((out / 'notes.md').exists())
 
 
 if __name__ == '__main__':
