@@ -36,6 +36,8 @@ CODEX_OFF = ('shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', '
              'skill_search', 'tool_suggest', 'multi_agent', 'goals', 'sleep_tool')
 FIT = 'scale={0}:{1}:force_original_aspect_ratio=decrease,pad={0}:{1}:(ow-iw)/2:(oh-ih)/2'
 SKILL = Path(__file__).resolve().parent / 'skill' / 'SKILL.md'
+# an image file named as a Markdown link target: `](path.jpg)`, `](path.png "title")` or `[id]: path.webp`
+IMAGE_LINK = re.compile(r'(?:\]\(\s*<?|^ {0,3}\[[^\]\n]+\]:\s*<?)([^\s)>]+\.(?:jpe?g|png|webp|gif))\b', re.I | re.M)
 # `vnotes direct`: where each --via posts, and the model it uses unless --model names another.
 # The model ids were read from the providers' model lists on 2026-11-17.
 URLS = {'chatgpt': 'https://chatgpt.com/backend-api/codex/responses',
@@ -565,7 +567,8 @@ def save_notes(out, text):
     Returns:
         The image links that point at no file. Empty when the notes were saved.
     """
-    missing = sorted({link for link in re.findall(r'\]\(([^)\s]+\.jpg)\)', text) if not (out / link).is_file()})
+    missing = sorted({link for link in IMAGE_LINK.findall(text)
+                      if not re.match(r'[a-z][a-z0-9+.-]*:', link, re.I) and not (out / link).is_file()})
     if not missing:
         part = out / 'notes.md.part'
         part.write_text(text + '\n')
@@ -746,30 +749,41 @@ def reply_text(lines):
         The text the model wrote.
 
     Raises:
-        Fail: If the stream carries an error, the reply was cut off or refused,
-            or there is no text.
+        Fail: If the model refused, ran out of room or was sent a bad request,
+            or there is no text. Trying again would not help.
+        ConnectionError: If the provider reported a passing fault, or the
+            stream ended without the provider's end mark. Worth another try.
     """
-    text = []
+    text, complete = [], False
     for line in lines:
-        if not line.startswith(b'data:') or line[5:].strip() in (b'', b'[DONE]'):
+        if not line.startswith(b'data:') or not line[5:].strip():
+            continue
+        if line[5:].strip() == b'[DONE]':
+            complete = True
             continue
         event = json.loads(line[5:])
         kind, choices = event.get('type'), event.get('choices') or []
         if kind in ('error', 'response.failed', 'response.incomplete') or event.get('error'):
             answer = event.get('response') or {}
             problem = event.get('error') or answer.get('error') or answer.get('incomplete_details') or event
-            raise Fail(f'The model stopped with an error: {scrub(json.dumps(problem))[:300]}')
+            label = f"{problem.get('type')} {problem.get('code')}" if isinstance(problem, dict) else ''
+            if re.search(r'overloaded|server_error|api_error|rate_limit|timeout|unavailable|\b(429|5\d\d)\b', label):
+                raise ConnectionError(f'the provider reported {json.dumps(problem)}')
+            raise Fail(f'The model stopped with an error: {json.dumps(problem)}')
         stops = [choice.get('finish_reason') for choice in choices]
         if kind == 'message_delta':
             stops.append(event['delta'].get('stop_reason'))
         for stop in stops:
             if stop in ('length', 'max_tokens', 'refusal', 'content_filter'):
                 raise Fail(f'The model did not finish its reply ({stop}).')
+        complete = complete or kind in ('response.completed', 'message_stop') or bool({'stop', 'end_turn'} & set(stops))
         if kind == 'response.output_text.delta':
             text.append(event['delta'])
         elif kind == 'content_block_delta':
             text.append(event['delta'].get('text', ''))
         text += [(choice.get('delta') or {}).get('content') or '' for choice in choices]
+    if not complete:  # a dropped connection must not pass for a finished reply
+        raise ConnectionError('the reply stopped before the provider marked it complete')
     if not ''.join(text).strip():
         raise Fail('The model sent an empty reply.')
     return ''.join(text).strip()
@@ -796,13 +810,22 @@ def send(via, model, system, parts):
         body['reasoning_effort'] = EFFORT
     request = urllib.request.Request(address, json.dumps(body).encode(), {
         **headers, 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'User-Agent': 'vnotes'})
+
+    def clean(text):  # every error this function shows passes through here
+        for name, secret in headers.items():
+            if name != 'anthropic-version':  # a server that echoes a credential must not get it into the output
+                text = text.replace(secret.split()[-1], '<secret>')
+        return scrub(' '.join(text.split()))[:300]
+
     for wait in (5, 20, 60, None):  # three more tries after a busy or broken answer, each after a longer wait
         try:
             with urllib.request.urlopen(request, timeout=900) as response:
                 return reply_text(response)
+        except Fail as error:
+            raise Fail(clean(str(error))) from None
         except urllib.error.HTTPError as error:
             status, problem = error.code, error.read().decode('utf-8', 'replace')
-        except (OSError, http.client.HTTPException, ValueError) as error:  # dropped or garbled connection
+        except (OSError, http.client.HTTPException, ValueError) as error:  # dropped, cut short or garbled
             status, problem = 0, f'{type(error).__name__}: {error}'
         if wait is None or 0 < status < 500 and status != 429:
             break
@@ -811,10 +834,7 @@ def send(via, model, system, parts):
     if via == 'chatgpt' and status == 401:
         # ponytail: the token is never refreshed here, because that would mean writing Codex's auth.json.
         raise Fail('The ChatGPT login was refused. Run `codex` once to renew the login.')
-    for secret in headers.values():  # a server that echoes a credential must not get it into the output
-        problem = problem.replace(secret.split()[-1], '<secret>')
-    raise Fail(f'The request to {via} failed ({status or "no connection"}): '
-               f'{scrub(" ".join(problem.split()))[:300]}')
+    raise Fail(f'The request to {via} failed ({status or "no connection"}): {clean(problem)}')
 
 
 def frame_lines(plan):
@@ -898,8 +918,9 @@ def direct(url, request, via, model, out):
     (out / 'draft.md').write_text(draft + '\n')
     print(f'Draft written, after {time.monotonic() - start:.0f} s. Saved as {out}/draft.md')
 
-    # only frames this run could have pulled are sent back, whatever path a link names
-    linked = sorted({link for link in re.findall(r'\]\((frames/[\w-]+\.jpg)\)', draft) if (out / link).is_file()})
+    # only JPEG files that really sit in the frames folder are sent back, whatever path a link names
+    linked = sorted({link for link in IMAGE_LINK.findall(draft) if link.endswith('.jpg')
+                     and (out / link).resolve().parent == out / 'frames' and (out / link).is_file()})
     parts = [f'{CHECK}\n## Draft of notes.md\n\n{draft}\n\n{material}']
     for link in linked:
         parts += [f'{link}:', out / link]

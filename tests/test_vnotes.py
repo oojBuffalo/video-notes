@@ -135,6 +135,21 @@ class FailureTests(unittest.TestCase):
         self.assertFalse((self.out / 'transcript.txt').exists())
 
 
+class LinkTests(unittest.TestCase):
+    def test_every_local_image_target_is_checked_and_web_images_are_not(self):
+        out = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (out / 'here.jpg').write_bytes(b'jpg')
+        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        text = ('![a](here.jpg) ![b](here.jpg "a title") ![web](https://x.test/far.png) [doc](other.md)\n'
+                '![c](gone.png) ![d](titled.jpg "a title") ![e](<angle.JPEG>) ![f][ref] [g](linked.gif)\n\n'
+                '[ref]: defined.webp "a title"\n')
+        self.assertEqual(vnotes.save_notes(out, text),
+                         ['angle.JPEG', 'defined.webp', 'gone.png', 'linked.gif', 'titled.jpg'])
+        self.assertFalse((out / 'notes.md').exists())
+        self.assertEqual(vnotes.save_notes(out, text.splitlines()[0]), [])
+        self.assertTrue((out / 'notes.md').exists())
+
+
 class HeadlessTests(unittest.TestCase):
     """The headless loop: frames are served first, and broken notes are never saved."""
 
@@ -222,24 +237,30 @@ class RequestTests(unittest.TestCase):
             with self.assertRaises(vnotes.Fail):
                 vnotes.reply_text([b'data: {"type":"response.output_text.delta","delta":""}\n', line])
 
+    def test_a_stream_without_its_end_mark_is_a_dropped_connection(self):
+        for line in (b'data: {"type":"response.output_text.delta","delta":"Hel"}\n',
+                     b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n',
+                     b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}\n'):
+            with self.assertRaises(ConnectionError):
+                vnotes.reply_text([line])
+
+
+GOOD = (b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Red"}}\n\n'
+        b'data: {"type":"message_stop"}\n\n')
+
 
 class FakeServer(http.server.BaseHTTPRequestHandler):
-    """Stands in for Anthropic: busy on the first request, then a streamed reply."""
+    """Stands in for Anthropic: answers each request with the next `(status, body)` in `script`."""
 
-    seen = []
+    script, seen = [], []
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['content-length'])))
         self.seen.append((self.headers, body))  # header names compare without case
-        if len(self.seen) == 1:
-            self.send_response(529)
-            self.end_headers()
-            self.wfile.write(b'{"error":{"message":"busy, key sk-ant-secret at https://x.test/y"}}')
-            return
-        self.send_response(200 if body['model'] != 'missing' else 404)
+        status, reply = self.script.pop(0)
+        self.send_response(status)
         self.end_headers()
-        self.wfile.write(b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Red"}}\n\n'
-                         if body['model'] != 'missing' else b'no such model; you sent sk-ant-secret')
+        self.wfile.write(reply)
 
     def log_message(self, *args):
         pass
@@ -256,24 +277,44 @@ class SendTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         FakeServer.seen = []
         self.enterContext(patch.dict(vnotes.URLS, anthropic=f'http://127.0.0.1:{server.server_port}/v1/messages'))
-        self.enterContext(patch.dict(vnotes.os.environ, ANTHROPIC_API_KEY='sk-ant-secret'))
+        self.enterContext(patch.dict(vnotes.os.environ, ANTHROPIC_API_KEY='hunter2-token'))
         self.enterContext(patch.object(vnotes.time, 'sleep'))
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
 
+    def send(self, *script):
+        FakeServer.script = list(script)
+        return vnotes.send('anthropic', 'claude-opus-5-5', 'rules', ['look'])
+
     def test_send_signs_the_request_retries_when_busy_and_returns_the_reply(self):
-        self.assertEqual(vnotes.send('anthropic', 'claude-opus-5-5', 'rules', ['look']), 'Red')
+        self.assertEqual(self.send((529, b'{"error":{"message":"busy"}}'), (200, GOOD)), 'Red')
         headers, body = FakeServer.seen[1]
-        self.assertEqual((headers['x-api-key'], headers['anthropic-version']), ('sk-ant-secret', '2026-10-21'))
+        self.assertEqual((headers['x-api-key'], headers['anthropic-version']), ('hunter2-token', '2026-10-21'))
         self.assertEqual((body['system'], body['messages'][0]['content'][0]['text']), ('rules', 'look'))
         self.assertEqual(len(FakeServer.seen), 2)
 
     def test_a_refused_request_fails_once_without_showing_the_key_or_an_address(self):
-        FakeServer.seen = [None]
         with self.assertRaises(vnotes.Fail) as caught:
-            vnotes.send('anthropic', 'missing', 'rules', ['look'])
+            self.send((404, b'no such model at https://x.test/y; you sent hunter2-token and sk-ant-other'))
         self.assertIn('404', str(caught.exception))
-        self.assertNotIn('sk-ant', str(caught.exception))
-        self.assertEqual(len(FakeServer.seen), 2)
+        for secret in ('hunter2', 'sk-ant', 'x.test'):
+            self.assertNotIn(secret, str(caught.exception))
+        self.assertEqual(len(FakeServer.seen), 1)
+
+    def test_an_error_inside_the_stream_does_not_show_the_key_either(self):
+        for kind, tries in (('invalid_request_error', 1), ('overloaded_error', 4)):
+            FakeServer.seen = []
+            echo = (200, b'data: {"type":"error","error":{"type":"%s","message":"bad key hunter2-token"}}\n\n'
+                    % kind.encode())
+            with self.assertRaises(vnotes.Fail) as caught:
+                self.send(*[echo] * tries)
+            self.assertIn(kind, str(caught.exception))
+            self.assertNotIn('hunter2', str(caught.exception))
+            self.assertEqual(len(FakeServer.seen), tries)
+
+    def test_a_passing_fault_or_a_cut_off_stream_is_tried_again(self):
+        overloaded = b'data: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n'
+        self.assertEqual(self.send((200, overloaded), (200, GOOD.split(b'\n\n')[0] + b'\n\n'), (200, GOOD)), 'Red')
+        self.assertEqual(len(FakeServer.seen), 3)
 
 
 class DirectTests(unittest.TestCase):
@@ -299,6 +340,7 @@ class DirectTests(unittest.TestCase):
         (out / 'transcript.txt').write_text('[00:10] words\n')
         (out / 'index').mkdir()
         (out / 'index' / 'index-000m.jpg').write_bytes(b'jpg')
+        (out / 'private.jpg').write_bytes(b'jpg')
         calls, replies = [], iter(replies)
 
         def send(via, model, system, parts):
@@ -323,7 +365,8 @@ class DirectTests(unittest.TestCase):
     def test_steps_run_in_order_plan_frames_write_check_save(self):
         out, (plan, pulled, write, check) = self.run_direct([
             'OUTLINE\n1. Intro\nFRAMES\n00:10 | the diagram\n00:50 | a chart\n02:00 | past the end\n',
-            '# Draft\n\n![d](frames/00-10.jpg) ![x](../meta.jpg)', '# Notes\n\n![d](frames/00-10.jpg)'])
+            '# Draft\n\n![d](frames/00-10.jpg "a title") ![x](frames/../private.jpg) ![y](private.jpg)',
+            '# Notes\n\n![d](frames/00-10.jpg)'])
         self.assertEqual(plan[1:], ['Index sheet index-000m.jpg, starting at 00:00:', out / 'index' / 'index-000m.jpg'])
         self.assertIn('focus on x', plan[0])
         self.assertEqual(pulled, (['10', '50'], 'trusted-url'))

@@ -107,8 +107,8 @@ Measured on Paper Club (4,902 s).
 ## 5. Review and tests
 
 - t8 reviewed the code and reported four findings; three were reproduced with mocks. All four are fixed.
-- 26 unit tests pass: time formats, caption parsing, track choice, stream choice, sheet count, keeping a frame or index when a refresh fails, refusing an empty transcription, serving a frame request before saving notes, and not saving notes that link to missing images. For `vnotes direct`: the three request bodies, reading the three reply streams, a cut-off or refused reply, the frame-line parser, missing credentials, the step order with a fake model, and a retry and a refusal against a local fake server.
-- The tests do not touch the network or a real agent. The two fake-server tests are skipped where a local port cannot be opened.
+- 30 unit tests pass: time formats, caption parsing, track choice, stream choice, sheet count, keeping a frame or index when a refresh fails, refusing an empty transcription, serving a frame request before saving notes, and not saving notes that link to missing images. For `vnotes direct`: the three request bodies, reading the three reply streams, a cut-off or refused reply, a stream that ends without its end mark, the frame-line parser, missing credentials, the step order with a fake model, and the image-link check (titles, reference-style links, other image types). Against a local fake server: a retry when busy, a refusal, an error inside the stream that echoes the key, and a retry after a passing fault or a cut-off stream.
+- The tests do not touch the network or a real agent. The four fake-server tests are skipped where a local port cannot be opened.
 
 ## 6. `vnotes direct`: request shapes
 
@@ -129,6 +129,7 @@ No full run of `vnotes direct` is recorded here yet. What was tried is one small
   - `openrouter`: `openai/gpt-6.2-sol` is in OpenRouter's public model list.
   - `openai`: the model list could not be read (401). The id is the one the other two lists use.
   - `anthropic`: the id comes from Anthropic's published model table, not from a live list.
+- **After the review fixes** the `chatgpt` and free `openrouter` requests were repeated and both replied "Red" (5.3 s and 3.7 s), so both send the end mark that `vnotes` now requires.
 - **Sizes, worked out offline.** With a saved run of the Warp video, the plan request is 1.6 MB (5 index sheets) and the write request is 9.9 MB (40 frames). Neither was sent.
 
 ## Still unproven
