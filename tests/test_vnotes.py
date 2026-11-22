@@ -105,6 +105,64 @@ VIDEO = {'id': 'x', 'duration': 100,
          'formats': [{'url': 's', 'protocol': 'https', 'vcodec': 'avc1.6', 'height': 1080}]}
 
 
+class OutputConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.config = self.root / '.config/vnotes/config'
+        self.config.parent.mkdir(parents=True)
+        self.enterContext(patch.object(vnotes, 'CONFIG', self.config))
+        self.enterContext(patch.dict(vnotes.os.environ, HOME=str(self.root)))
+        self.enterContext(contextlib.chdir(self.root))
+        self.log = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        self.errors = self.enterContext(contextlib.redirect_stderr(io.StringIO()))
+        self.info = {'id': 'x', 'title': '../A/B'}
+        self.enterContext(patch.object(vnotes, 'video_info', return_value=self.info))
+        self.enterContext(patch.object(vnotes, 'transcribe', return_value=['[00:00] Hello']))
+        self.enterContext(patch.object(vnotes.shutil, 'which', return_value='/fake/tool'))
+
+    def cli(self, *args):
+        with patch.object(vnotes.sys, 'argv', ['vnotes', *args]):
+            return vnotes.main()
+
+    def test_missing_config_preserves_layout(self):
+        self.assertEqual(self.cli('fetch', 'url'), 0)
+        self.assertEqual(json.loads(Path('notes-x/meta.json').read_text())['notes_file'], 'notes.md')
+
+    def test_skill_fetch_headless_and_direct_use_the_same_paths(self):
+        self.config.write_text('[output]\ndirectory = ~/Study Notes\nfolder_template = %(id)s - %(title)s\n'
+                               'notes_template = %(upload_date)s %(title)s 100%%.md\n')
+        folder = self.root / 'Study Notes/x - _A_B'
+        filename = 'NA _A_B 100%.md'
+        self.assertEqual(self.cli('fetch', 'url'), 0)
+        self.assertIn(f'Notes path: {folder / filename}', self.log.getvalue())
+        self.assertEqual(json.loads((folder / 'meta.json').read_text())['notes_file'], filename)
+        with patch.object(vnotes, 'ask', return_value='# Headless'):
+            self.assertEqual(self.cli('notes', 'url'), 0)
+        self.assertEqual((folder / filename).read_text(), '# Headless\n')
+        with patch.object(vnotes, 'connect'), patch.object(vnotes, 'send', side_effect=['outline', 'draft', '# Direct']):
+            self.assertEqual(self.cli('direct', 'url', '--via', 'openai', '--out', 'custom folder'), 0)
+        self.assertTrue((Path('custom folder') / filename).read_text().startswith('# Direct\n'))
+        self.assertEqual(self.cli('fetch', 'url', 'exact'), 0)
+        self.assertTrue(Path('exact/meta.json').is_file())
+
+    def test_bad_config_reports_the_file_and_writes_nothing(self):
+        for contents in ('[output', '[output]\noutput_dir = typo', '[output]\nfolder_template = ..',
+                         '[output]\nfolder_template = ../%(id)s', '[output]\nnotes_template = DRAFT.md',
+                         '[output]\nnotes_template = %(typo)s.md'):
+            with self.subTest(contents=contents):
+                self.config.write_text(contents)
+                self.assertEqual(self.cli('fetch', 'url'), 1)
+                self.assertIn(str(self.config), self.errors.getvalue())
+                self.assertFalse(Path('notes-x').exists())
+
+    def test_matching_titles_do_not_overwrite_another_video(self):
+        self.config.write_text('[output]\nfolder_template = %(title)s')
+        self.assertEqual(self.cli('fetch', 'first'), 0)
+        self.info['id'] = 'second'
+        self.assertEqual(self.cli('fetch', 'second'), 1)
+        self.assertEqual(json.loads(Path('_A_B/meta.json').read_text())['id'], 'x')
+
+
 class FailureTests(unittest.TestCase):
     """What must survive, or be refused, when a step fails."""
 
@@ -113,6 +171,7 @@ class FailureTests(unittest.TestCase):
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
         self.enterContext(patch.object(vnotes, 'video_info', return_value=VIDEO))
+        self.enterContext(patch.object(vnotes, 'CONFIG', self.out / 'missing-config'))
 
     def test_failed_frame_refresh_keeps_the_frame_the_notes_use(self):
         (self.out / 'meta.json').write_text(json.dumps({'url': 'u', 'duration': 100}))

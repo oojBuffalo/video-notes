@@ -58,11 +58,31 @@ Open the Markdown path printed when the run finishes. The transcript, timeline i
 
 Index tiles can miss short-lived slides. The project’s acceptance runs used YouTube talks. Measurements, harness permissions, and known limits are in the [validation report](docs/validation.md).
 
+## Output configuration
+
+Both the CLI and the interactive skill read `~/.config/vnotes/config`. Install the starter file from the repository root.
+
+```sh
+mkdir -p ~/.config/vnotes
+cp -n config.example ~/.config/vnotes/config
+```
+
+For a single library across projects, use the following settings.
+
+```ini
+[output]
+directory = ~/Documents/Video Notes
+folder_template = %(title)s [%(id)s]
+notes_template = %(title)s.md
+```
+
+The default layout is `./notes-<id>/notes.md`. Templates accept `%(id)s`, `%(title)s`, `%(channel)s`, `%(uploader)s`, and `%(upload_date)s`. Use `%%` for a percent sign. Missing fields become `NA`. An explicit directory on `fetch` or `--out DIR` on `notes` and `direct` overrides the folder for one run. The configured Markdown filename still applies. [Starter config](config.example)
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `vnotes fetch URL DIR` | Writes `meta.json`, `transcript.txt`, and timeline sheets. Add `--transcribe` to use the audio even when captions exist. |
+| `vnotes fetch URL [DIR]` | Writes `meta.json`, `transcript.txt`, and timeline sheets. Add `--transcribe` to use the audio even when captions exist. |
 | `vnotes frames DIR TIME...` | Extracts frames from a fetched video. Times can be seconds, `mm:ss`, or `h:mm:ss`. |
 | `vnotes notes URL` | Runs the skill headless. Accepts `--agent claude` or `--agent codex`, `--prompt TEXT`, and `--out DIR`. |
 | `vnotes direct URL --via PROVIDER` | Uses three model calls to plan, write, and check the notes. Accepts `--model`, `--prompt`, and `--out`. |

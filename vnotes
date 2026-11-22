@@ -7,6 +7,7 @@ itself, in fixed steps.
 """
 import argparse
 import base64
+import configparser
 import contextlib
 import functools
 import html
@@ -36,6 +37,9 @@ CODEX_OFF = ('shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', '
              'skill_search', 'tool_suggest', 'multi_agent', 'goals', 'sleep_tool')
 FIT = 'scale={0}:{1}:force_original_aspect_ratio=decrease,pad={0}:{1}:(ow-iw)/2:(oh-ih)/2'
 SKILL = Path(__file__).resolve().parent / 'skill' / 'SKILL.md'
+CONFIG = Path.home() / '.config' / 'vnotes' / 'config'
+OUTPUT_DEFAULTS = {'directory': '.', 'folder_template': 'notes-%(id)s', 'notes_template': 'notes.md'}
+NAME_FIELDS = ('id', 'title', 'channel', 'uploader', 'upload_date')
 # `vnotes direct`: where each --via posts, and the model it uses unless --model names another.
 # The model ids were read from the providers' model lists on 2026-11-17.
 URLS = {'chatgpt': 'https://chatgpt.com/backend-api/codex/responses',
@@ -81,7 +85,7 @@ for talking heads, title cards and repeats of a picture already used. It is not 
 - Leave out a frame that is mid-animation, mid-transition or does not show what was planned for it, and say in the \
 notes which planned picture could not be captured.
 
-Reply with the complete text of notes.md and nothing else: no preamble and no code fence. Link images as \
+Reply with the complete Markdown notes and nothing else: no preamble and no code fence. Link images as \
 `frames/01-22.jpg`, using only the file names given below.
 """
 CHECK = """Step: check the notes. Below are a draft of the notes, then meta.json and the transcript, then every \
@@ -105,13 +109,49 @@ add talking heads, title cards, repeats or frames caught mid-animation.
 5. Check that each section's timestamp link matches the transcript line where its topic starts.
 Keep everything else as it is.
 
-Reply with the complete corrected text of notes.md and nothing else: no preamble, no list of changes and no code \
+Reply with the complete corrected Markdown notes and nothing else: no preamble, no list of changes and no code \
 fence. Link images as `frames/01-22.jpg`, using only the file names given below.
 """
 
 
 class Fail(Exception):
     """An error to show the user as one plain line."""
+
+
+def output_config():
+    config = configparser.ConfigParser(interpolation=None)
+    config['output'] = OUTPUT_DEFAULTS
+    try:
+        with CONFIG.open(encoding='utf-8') as stream:
+            config.read_file(stream)
+    except FileNotFoundError:
+        return OUTPUT_DEFAULTS
+    except (configparser.Error, UnicodeError, OSError) as error:
+        raise Fail(f'Could not read {CONFIG}: {error}') from None
+    settings = config['output']
+    unknown = (set(config.sections()) - {'output'}) | (set(settings) - OUTPUT_DEFAULTS.keys())
+    if unknown:
+        raise Fail(f'Unknown setting in {CONFIG}: {", ".join(sorted(unknown))}')
+    if not settings['directory']:
+        raise Fail(f'{CONFIG}: directory is empty.')
+    return settings
+
+
+def output_name(settings, key, info):
+    """Render one filename component, keeping separators in video metadata out of paths."""
+    def substitute(match):
+        if match[0] == '%%':
+            return '%'
+        field = match[1]
+        if field not in NAME_FIELDS:
+            raise Fail(f'{CONFIG}: {key} accepts %(field)s for {", ".join(NAME_FIELDS)}, or %% for a percent sign.')
+        value = str(info.get(field) or 'NA')
+        return re.sub(r'[/\\:*?"<>|\x00-\x1f\x7f]', '_', value).strip(' .') or 'NA'
+
+    name = re.sub(r'%%|%\((\w+)\)s|%', substitute, settings[key])
+    if not name.strip(' .') or re.search(r'[/\\\x00-\x1f\x7f]', name) or len(name.encode('utf-8')) > 255:
+        raise Fail(f'{CONFIG}: {key} must produce a single filename of at most 255 bytes.')
+    return name
 
 
 def stamp(seconds):
@@ -426,7 +466,7 @@ def fetch(url, out=None, force_transcribe=False):
 
     Args:
         url: The video page.
-        out: Folder to write into. Defaults to `notes-<video id>`.
+        out: Exact folder to write into. When omitted, use the configured directory and folder template.
         force_transcribe: Transcribe the audio even when captions exist.
 
     Returns:
@@ -435,8 +475,26 @@ def fetch(url, out=None, force_transcribe=False):
     Raises:
         Fail: If the video, its words or its index cannot be fetched.
     """
+    settings = output_config()
     info = video_info(url)
-    out = Path(out or f"notes-{info['id']}")
+    notes_file = output_name(settings, 'notes_template', info)
+    if not notes_file.lower().endswith('.md') or notes_file.casefold() in {'draft.md', 'plan.md', 'notes.rejected.md'}:
+        raise Fail(f'{CONFIG}: notes_template must name a Markdown (.md) file other than draft.md, plan.md or notes.rejected.md.')
+    if out is None:
+        out = Path(settings['directory']).expanduser() / output_name(settings, 'folder_template', info)
+        if out.is_symlink():
+            raise Fail(f'The configured video folder {out} is a symlink. Choose a different folder.')
+        if out.is_dir() and any(out.iterdir()):
+            try:
+                previous = json.loads((out / 'meta.json').read_text())
+            except (OSError, ValueError):
+                previous = {}
+            if not isinstance(previous, dict) or previous.get('id') != info['id']:
+                raise Fail(f'{out} already contains other files. Choose a unique folder_template, e.g. notes-%(id)s.')
+    else:
+        out = Path(out).expanduser()
+    if (out / notes_file).is_symlink():
+        raise Fail(f'The notes path {out / notes_file} is a symlink. Choose a different notes filename.')
     out.mkdir(parents=True, exist_ok=True)
     lines, source, problem = [], None, ''
     tracks = [] if force_transcribe else pick_tracks(info)
@@ -462,10 +520,11 @@ def fetch(url, out=None, force_transcribe=False):
             raise Fail('The audio was transcribed but no speech was found, so there are no words to make notes from.')
     meta = {key: info.get(key) for key in
             ('id', 'title', 'uploader', 'duration', 'upload_date', 'chapters', 'description')}
-    meta.update(url=info.get('webpage_url') or url, words=source)
+    meta.update(url=info.get('webpage_url') or url, words=source, notes_file=notes_file)
     (out / 'meta.json').write_text(json.dumps(meta, indent=1, ensure_ascii=False) + '\n')
     (out / 'transcript.txt').write_text('\n'.join(lines) + '\n')
     print(f'{out}/meta.json')
+    print(f'Notes path: {out / notes_file}')
     print(f'{out}/transcript.txt  {len(lines)} lines from {source}')
     sheets = index_sheets(info, out)
     if not sheets:
@@ -604,12 +663,13 @@ def local_images(text):
     return [target for target in found if target and not re.match(r'[a-z][a-z0-9+.-]*:', target, re.I)]
 
 
-def save_notes(out, text):
-    """Saves notes.md, unless it links to images that are not files inside the notes folder.
+def save_notes(out, text, filename='notes.md'):
+    """Saves the notes, unless they link to images that are not files inside the notes folder.
 
     Args:
         out: The notes folder.
         text: The complete notes.
+        filename: The notes filename selected during fetch.
 
     Returns:
         The image links that point at no file, or at one outside the folder.
@@ -621,8 +681,8 @@ def save_notes(out, text):
     if not missing:
         part = out / 'notes.md.part'
         part.write_text(text + '\n')
-        os.replace(part, out / 'notes.md')
-        print(out / 'notes.md')
+        os.replace(part, out / filename)
+        print(out / filename)
     return missing
 
 
@@ -631,7 +691,7 @@ def notes(url, request, agent, out):
 
     The transcript and the pictures are untrusted text, so the agent can only
     read. It replies with either a frame request or the finished notes; this
-    function pulls the frames and writes notes.md itself.
+    function pulls the frames and writes the notes itself.
 
     Args:
         url: The video page.
@@ -645,6 +705,8 @@ def notes(url, request, agent, out):
     if not shutil.which(agent):
         raise Fail(f'{agent} is not installed or not on PATH.')
     out = fetch(url, out).resolve()
+    meta = (out / 'meta.json').read_text()
+    filename = json.loads(meta).get('notes_file', 'notes.md')
     sheets = '\n'.join(str(sheet) for sheet in sorted((out / 'index').glob('*.jpg'))) or 'none: the video has no picture'
     brief = (f'Write video notes by following the skill at the end of this message.\n\nURL: {url}\n'
              f'What the reader asked for: {request or "thorough study notes"}\n\n'
@@ -657,10 +719,10 @@ def notes(url, request, agent, out):
              'example `FRAMES: 1:22 3:54 12:40`. Under that line write a handover: the outline of the notes '
              'so far and what each requested frame should show. A fresh session will be given that handover '
              'and the frames. Ask for the bracketing call the same way.\n'
-             '- When the notes are finished (step 4), reply with the complete text of notes.md and nothing '
-             'else: no preamble and no code fence. Your reply is saved as notes.md word for word. Link images '
+             '- When the notes are finished (step 4), reply with the complete Markdown notes and nothing '
+             'else: no preamble and no code fence. Your reply is saved word for word. Link images '
              'as `frames/01-22.jpg`.\n\n')
-    material = (f"## meta.json\n\n{(out / 'meta.json').read_text()}\n"
+    material = (f"## meta.json\n\n{meta}\n"
                 f"## transcript.txt\n\n{(out / 'transcript.txt').read_text()}\n"
                 + SKILL.read_text())
     progress = ''
@@ -680,7 +742,7 @@ def notes(url, request, agent, out):
             print(outcome)
             progress += f'## Progress: turn {turn}\n\nYou replied:\n\n{reply}\n\nWhat happened:\n\n{outcome}\n\n'
             continue
-        missing = save_notes(out, reply)
+        missing = save_notes(out, reply, filename)
         if not missing:
             return
         outcome = f'Your notes were not saved. They link to images that do not exist: {", ".join(missing)}.'
@@ -969,14 +1031,15 @@ def direct(url, request, via, model, out):
     print(f'Draft written, after {time.monotonic() - start:.0f} s. Saved as {out}/draft.md')
 
     # the check sees every pulled frame, not only the linked ones, so it can notice what the draft left out
-    checked = send(via, model, SYSTEM, [f'{CHECK}\n## Draft of notes.md\n\n{draft}\n\n{material}', *pulled])
+    checked = send(via, model, SYSTEM, [f'{CHECK}\n## Draft notes\n\n{draft}\n\n{material}', *pulled])
     print(f'Draft checked against {len(pulled) // 2} frames, after {time.monotonic() - start:.0f} s.')
     checked += (f"\n\n---\n\nWords: {meta.get('words')}. Index sheets sent to the model: {len(sheets)}. "
                 f'Frames pulled and sent: {len(pulled) // 2}. Written by {model} via {via} with `vnotes direct`.')
-    missing = save_notes(out, checked)
+    filename = meta.get('notes_file', 'notes.md')
+    missing = save_notes(out, checked, filename)
     if missing:
         (out / 'notes.rejected.md').write_text(checked + '\n')
-        raise Fail(f'The notes link to images that do not exist, so notes.md was not written: {", ".join(missing)}. '
+        raise Fail(f'The notes link to images that do not exist, so {filename} was not written: {", ".join(missing)}. '
                    f'The text is in {out}/notes.rejected.md')
 
 
@@ -986,27 +1049,28 @@ def main():
     Returns:
         Process exit code.
     """
-    parser = argparse.ArgumentParser(prog='vnotes', description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(prog='vnotes', description=__doc__.splitlines()[0],
+                                     epilog='Output settings: ~/.config/vnotes/config')
     commands = parser.add_subparsers(dest='command', required=True)
     sub = commands.add_parser('fetch', help='write meta.json, transcript.txt and index sheets')
     sub.add_argument('url')
-    sub.add_argument('dir')
+    sub.add_argument('dir', nargs='?', help='exact output folder (overrides the configured folder)')
     sub.add_argument('--transcribe', action='store_true', help='transcribe the audio even when captions exist')
     sub = commands.add_parser('frames', help='write 1080p frames and a contact sheet')
     sub.add_argument('dir')
     sub.add_argument('times', nargs='+', metavar='TIME', help='seconds, mm:ss or h:mm:ss')
-    sub = commands.add_parser('notes', help='run the skill headless and write notes.md')
+    sub = commands.add_parser('notes', help='run the skill headless and write Markdown notes')
     sub.add_argument('url')
     sub.add_argument('--prompt', help='what you want from the notes')
     sub.add_argument('--agent', choices=['claude', 'codex'], default='claude')
-    sub.add_argument('--out', metavar='DIR', help='folder to write into (default: notes-<video id>)')
-    sub = commands.add_parser('direct', help='call a model in fixed steps and write notes.md')
+    sub.add_argument('--out', metavar='DIR', help='exact output folder (overrides the configured folder)')
+    sub = commands.add_parser('direct', help='call a model in fixed steps and write Markdown notes')
     sub.add_argument('url')
     sub.add_argument('--via', required=True, choices=['chatgpt', 'openai', 'anthropic', 'openrouter', 'endpoint'],
                      help='the ChatGPT login Codex saved, or an API key from the environment')
     sub.add_argument('--model', help="model id (default: one per provider; required for 'endpoint')")
     sub.add_argument('--prompt', help='what you want from the notes')
-    sub.add_argument('--out', metavar='DIR', help='folder to write into (default: notes-<video id>)')
+    sub.add_argument('--out', metavar='DIR', help='exact output folder (overrides the configured folder)')
     args = parser.parse_args()
     try:
         if not shutil.which('ffmpeg'):
@@ -1019,7 +1083,7 @@ def main():
             direct(args.url, args.prompt, args.via, args.model, args.out)
         else:
             notes(args.url, args.prompt, args.agent, args.out)
-    except Fail as error:
+    except (Fail, OSError) as error:
         print(f'vnotes: {error}', file=sys.stderr)
         return 1
     return 0
