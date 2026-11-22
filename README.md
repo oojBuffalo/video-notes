@@ -101,13 +101,22 @@ Use `direct` to run the fixed sequence without an agent CLI. The model receives 
 
 ## Contributing
 
-The CLI lives in `vnotes`. The agent follows the [video-notes skill](skill/SKILL.md). Use Python 3.11 or later to run the offline tests from the repository root.
+```
+vnotes              command-line entry point
+video_notes/        core.py (fetch, frames, saving notes), agent.py (notes), direct.py (direct)
+skill/SKILL.md      the skill the agent follows
+tests/              offline tests
+docs/               validation report and the review reports behind it
+examples/           the published Warp example
+```
+
+Use Python 3.11 or later to run the offline tests from the repository root.
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-Keep personal video bundles in `notes/` and development runs in `runs/`. Git ignores both. The published example contains the finished Markdown and the frames it links to.
+Open work is in [GitHub Issues](https://github.com/oojBuffalo/video-notes/issues), and shipped changes are in the [changelog](CHANGELOG.md). Keep personal video bundles in `notes/` and development runs in `.local/`. Git ignores both. The published example contains the finished Markdown and the frames it links to.
 
 ## License
 
