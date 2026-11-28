@@ -1,0 +1,8 @@
+# Install as ~/.config/vnotes/config. These values preserve the default layout.
+[output]
+# For one library across projects, set directory = ~/Documents/Video Notes
+directory = .
+# Example: %(upload_date)s - %(title)s [%(id)s]
+folder_template = notes-%(id)s
+# Example: %(title)s.md
+notes_template = notes.md

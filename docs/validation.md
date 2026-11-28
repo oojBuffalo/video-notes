@@ -2,7 +2,7 @@
 
 What was measured for the skill-first tool, and what was not.
 Every number here comes from a run on one machine on 2026-11-14, except section 6, which is from 2026-11-17. Nothing here is a guarantee of speed or quality.
-The reports behind each number are in [`council/`](council/).
+The reports behind each number are in [`council/`](council/). The `runs/...` folders they cite are kept locally, untracked, in `.local/runs/`.
 
 The earlier prototype (a fixed pipeline that called model APIs) was removed. Its saved times were 33.3 s, 38.0 s and 49.2 s for the three videos below; they are quoted only as the baseline.
 

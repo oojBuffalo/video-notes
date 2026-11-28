@@ -58,11 +58,31 @@ Open the Markdown path printed when the run finishes. The transcript, timeline i
 
 Index tiles can miss short-lived slides. The project’s acceptance runs used YouTube talks. Measurements, harness permissions, and known limits are in the [validation report](docs/validation.md).
 
+## Output configuration
+
+Both the CLI and the interactive skill read `~/.config/vnotes/config`. Install the starter file from the repository root.
+
+```sh
+mkdir -p ~/.config/vnotes
+cp -n config.example ~/.config/vnotes/config
+```
+
+For a single library across projects, use the following settings.
+
+```ini
+[output]
+directory = ~/Documents/Video Notes
+folder_template = %(title)s [%(id)s]
+notes_template = %(title)s.md
+```
+
+The default layout is `./notes-<id>/notes.md`. Templates accept `%(id)s`, `%(title)s`, `%(channel)s`, `%(uploader)s`, and `%(upload_date)s`. Use `%%` for a percent sign. Missing fields become `NA`. An explicit directory on `fetch` or `--out DIR` on `notes` and `direct` overrides the folder for one run. The configured Markdown filename still applies. [Starter config](config.example)
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `vnotes fetch URL DIR` | Writes `meta.json`, `transcript.txt`, and timeline sheets. Add `--transcribe` to use the audio even when captions exist. |
+| `vnotes fetch URL [DIR]` | Writes `meta.json`, `transcript.txt`, and timeline sheets. Add `--transcribe` to use the audio even when captions exist. |
 | `vnotes frames DIR TIME...` | Extracts frames from a fetched video. Times can be seconds, `mm:ss`, or `h:mm:ss`. |
 | `vnotes notes URL` | Runs the skill headless. Accepts `--agent claude` or `--agent codex`, `--prompt TEXT`, and `--out DIR`. |
 | `vnotes direct URL --via PROVIDER` | Uses three model calls to plan, write, and check the notes. Accepts `--model`, `--prompt`, and `--out`. |
@@ -81,13 +101,22 @@ Use `direct` to run the fixed sequence without an agent CLI. The model receives 
 
 ## Contributing
 
-The CLI lives in `vnotes`. The agent follows the [video-notes skill](skill/SKILL.md). Use Python 3.11 or later to run the offline tests from the repository root.
+```
+vnotes              command-line entry point
+video_notes/        core.py (fetch, frames, saving notes), agent.py (notes), direct.py (direct)
+skill/SKILL.md      the skill the agent follows
+tests/              offline tests
+docs/               validation report and the review reports behind it
+examples/           the published Warp example
+```
+
+Use Python 3.11 or later to run the offline tests from the repository root.
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-Keep personal video bundles in `notes/` and development runs in `runs/`. Git ignores both. The published example contains the finished Markdown and the frames it links to.
+Open work is in [GitHub Issues](https://github.com/oojBuffalo/video-notes/issues), and shipped changes are in the [changelog](CHANGELOG.md). Keep personal video bundles in `notes/` and development runs in `.local/`. Git ignores both. The published example contains the finished Markdown and the frames it links to.
 
 ## License
 
